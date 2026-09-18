@@ -13,3 +13,8 @@ volatility/logs/
 
 # Accumulated overnight results (machine generated, regenerable).
 volatility/results.csv
+
+# Punt model: same generated artefacts as the base model.
+volatility_punt/heats/
+volatility_punt/logs/
+volatility_punt/results.csv
