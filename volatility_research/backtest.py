@@ -234,6 +234,12 @@ def run(snapshots, policy, verbose=False, forecast_news=None,
         if len(news) != last_news:
             last_news = len(news)
             pending_resize = True
+            # A release is a real step, not the rounding noise the EMA exists
+            # to filter, so let the signal jump toward the new reading instead
+            # of easing into it over the next ten ticks.
+            if at.NEWS_JUMP and gap_ema is not None:
+                gap_ema += at.NEWS_JUMP * (raw_gap - gap_ema)
+                gap = gap_ema + at.MOMENTUM_WEIGHT * momentum
             news_pnl_marks.append((tick, book.cash))
 
         # ------------------------------------------------------ pick strike

@@ -187,3 +187,39 @@ python sweep.py --punt            # every variance variant, side by side
 python test_engine.py             # 139 offline checks
 python autotrader.py --live       # trade it
 ```
+
+## Change 2 — the "react faster, trade continuously" premise was wrong
+
+Tested 18 Sep over 95-111 recordings. The premise came from a real observation:
+capture is 60-73% in the buckets right after a news release but only 28-56%
+between them. Every way of trading MORE between releases loses money.
+
+| idea | result vs shipped |
+|---|---|
+| continuous rebalancing | −$4,059 (t −1.9) |
+| deadband 40 / 60 | −$4,887 / −$7,293 |
+| exit threshold 0.001 / 0.0 | −$2,175 / −$3,662 |
+| carry into expiry | −$5,516 |
+| momentum in the signal, weight 0.25 | −$8,745 (t −3.9) |
+| news jump 0.25 / 0.50 / 1.0 | −$4,373 / −$7,404 / −$10,714 |
+| **ratchet sizing** | **+$1,815 (t 3.2)** ✅ |
+
+Three findings worth keeping.
+
+**Correlation is not profitability.** The maker's own recent drift is by far the
+best predictor of its next move — correlation 0.271 over 30,932 observations,
+against 0.124 for the EMA gap we trade. Trading it loses badly, because
+momentum rises as the maker converges toward our forecast, so it says "add"
+exactly when the remaining edge is smallest.
+
+**The EMA's lag is protective, not a cost.** Jumping the signal toward the raw
+gap when news lands loses monotonically, and the signal study says why: right
+after a release the EMA predicts far better than the raw gap (0.766 against
+0.601). That is where cent-rounding noise is worst relative to the signal, so
+the smoothing earns its keep precisely when it looks most expensive.
+
+**Size was never the constraint.** We sit at the 1,000-contract limit on 86% of
+the ticks we hold anything, and the sign is already right 84.2% of the time. A
+better signal that merely rescales the gap cannot do anything at all — which is
+why the sizing ramp (a threshold change) was worth $19,554 while momentum (a
+magnitude change) was worth less than nothing.

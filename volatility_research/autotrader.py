@@ -135,6 +135,13 @@ GAP_SMOOTHING = 0.15
 # In the ticks right after a release the EMA predicts far BETTER than the raw
 # gap (0.766 against 0.601), because that is where the cent-rounding noise is
 # worst relative to the signal.
+# How far to jump the smoothed gap toward the raw one when news lands.
+#
+# A news release is a genuine step change, not the cent-rounding noise the EMA
+# exists to suppress - but the EMA cannot tell them apart, so at the moment we
+# resize the signal is still mostly the OLD gap. 0.0 keeps the plain EMA, 1.0
+# resets it to the raw gap on every release.
+NEWS_JUMP = 0.0
 MOMENTUM_TICKS = 10
 MOMENTUM_WEIGHT = 0.0
 # Resize the option position only when NEW INFORMATION arrives.
