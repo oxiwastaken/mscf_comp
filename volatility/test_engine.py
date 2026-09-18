@@ -505,6 +505,27 @@ check('a hedge that would breach the RTM limit is capped, not abandoned',
       all(q <= config.MAX_TRADE_RTM for tkr, _a, q in t.client.sent
           if tkr == config.UNDERLYING))
 
+# Churn. Opening a NEAR-THE-MONEY straddle is the common case, and its legs have
+# opposite-signed deltas that nearly cancel. Sending every call chunk and then
+# every put chunk walks delta out and back, dragging hedges both ways - measured
+# live at +74% RTM volume, which gave back half of what Change 1 saved. Ordering
+# the chunks to keep running delta near zero should need almost no hedging.
+atm_c = leg('RTM50C', 50, 'c', 0, delta=0.52)
+atm_p = leg('RTM50P', 50, 'p', 0, delta=-0.48)
+atm_rows = [atm_c, atm_p]
+t = make_trader()
+t.execute({'rows': atm_rows, 'portfolio_delta': 0.0, 'underlying_position': 0.0,
+           'spot': 50.0}, 50.0, atm_c, atm_p, 500)
+hedge_shares = sum(q for tkr, _a, q in t.client.sent if tkr == config.UNDERLYING)
+check('opening a balanced straddle barely hedges at all',
+      hedge_shares <= 5_000, f'hedged {hedge_shares:,} shares')
+check('the straddle itself is still fully sent',
+      sum(q for tkr, _a, q in t.client.sent if tkr != config.UNDERLYING) == 1000)
+check('call and put chunks are alternated, not run leg by leg',
+      len({tkr for tkr, _a, _q in t.client.sent[:4]
+           if tkr != config.UNDERLYING}) == 2,
+      f'first sends {[s[0] for s in t.client.sent[:4]]}')
+
 # The hedge must be computed from the position we are ABOUT to hold, not the
 # one we held before this tick's option trades. Hedging the stale figure and
 # correcting a tick later produced BUY 12,369 RTM followed by SELL 12,381 one

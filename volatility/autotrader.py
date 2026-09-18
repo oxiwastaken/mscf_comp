@@ -335,20 +335,19 @@ class AutoTrader:
                      or self._pending_resize or target == 0)
 
         if may_trade:
+            # execute() hedges as it goes and returns the state it left behind.
+            # It must NOT be followed by hedge(), which reads
+            # chain['underlying_position'] - a figure captured before this
+            # tick's share trades and therefore blind to every hedge execute()
+            # just sent. Doing both re-hedged the same delta twice.
             self.execute(chain, strike, call, put, target)
             self._pending_resize = False
-            hedge_target = target
         else:
             # Not trading this tick, so the hedge must project the position we
-            # are actually keeping, not the one we merely computed.
-            hedge_target = int(round(held))
-
-        # Hedge the delta we are about to HAVE, not the one we had before
-        # trading. Hedging the stale figure and correcting next tick is what
-        # produced BUY 12,369 RTM followed one second later by SELL 12,381.
-        # After execute() this is normally a no-op; it still runs so a rejected
-        # or partially filled chunk cannot leave the book unhedged.
-        self.hedge(chain, strike, hedge_target)
+            # are actually keeping, not the one we merely computed. Hedging the
+            # stale figure and correcting next tick is what produced
+            # BUY 12,369 RTM followed one second later by SELL 12,381.
+            self.hedge(chain, strike, int(round(held)))
         return True
 
     def option_orders(self, chain, strike, call, put, target):
@@ -401,19 +400,54 @@ class AutoTrader:
         """
         delta = float(chain['portfolio_delta'])
         underlying = float(chain['underlying_position'])
+        for row, lot in self.chunks(chain, strike, call, put, target, delta):
+            action = 'BUY' if lot > 0 else 'SELL'
+            self.send(row['ticker'], action, abs(lot), config.MAX_TRADE_OPTIONS)
+            delta += lot * (row['delta'] or 0.0) * config.CONTRACT_MULTIPLIER
+            delta, underlying = self.hedge_running(delta, underlying)
+        return delta, underlying
+
+    def chunks(self, chain, strike, call, put, target, delta):
+        """
+        The tick's orders split into chunks and ORDERED to keep delta flat.
+
+        Sending every call chunk and then every put chunk is what the first
+        version of this did, and it churned the hedge badly: delta walks one way
+        through the whole call leg, dragging hedges after it, then walks back
+        through the put leg dragging the opposite hedges. Measured live, RTM
+        volume rose 74% (244,598 to 425,994 shares a heat) and gave back half
+        the penalty saving in share commission.
+
+        A straddle's legs have opposite-signed deltas that very nearly cancel,
+        so alternating them keeps the running delta near zero and almost no
+        hedging is needed mid-resize. Rather than hard-coding call-then-put,
+        pick at each step whichever remaining chunk leaves |delta| smallest -
+        that handles lopsided legs and strike switches too.
+
+        Closes still go strictly first. The net option limit is enforced on
+        submission, so capacity has to be freed before it can be used.
+        """
+        pending = []
         for row, change in self.option_orders(chain, strike, call, put, target):
-            action = 'BUY' if change > 0 else 'SELL'
-            remaining = abs(change)
+            closing = row['strike'] != strike
             step = self.chunk_for(row)
+            remaining = abs(change)
+            sign = 1 if change > 0 else -1
             while remaining > 0:
                 lot = min(step, remaining)
-                self.send(row['ticker'], action, lot, config.MAX_TRADE_OPTIONS)
+                pending.append((0 if closing else 1, row, sign * lot))
                 remaining -= lot
-                if row['delta'] is not None:
-                    signed = lot if change > 0 else -lot
-                    delta += signed * row['delta'] * config.CONTRACT_MULTIPLIER
-                delta, underlying = self.hedge_running(delta, underlying)
-        return delta
+
+        ordered = []
+        while pending:
+            phase = min(p[0] for p in pending)
+            options = [p for p in pending if p[0] == phase]
+            best = min(options, key=lambda p: abs(
+                delta + p[2] * (p[1]['delta'] or 0.0) * config.CONTRACT_MULTIPLIER))
+            pending.remove(best)
+            delta += best[2] * (best[1]['delta'] or 0.0) * config.CONTRACT_MULTIPLIER
+            ordered.append((best[1], best[2]))
+        return ordered
 
     def chunk_for(self, row):
         """
