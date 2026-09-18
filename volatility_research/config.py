@@ -133,8 +133,8 @@ MAX_IV_SPREAD = 0.015          # vol points of noise implied by the quote width
 # directional exposure - and hedging less often saves the commission too. This
 # is the one aggressive setting that also RAISES expected P&L (+$4,307 a heat,
 # paired t = 3.3 over 95 recordings), because it is mostly a fee saving.
-HEDGE_TRIGGER_DELTA = 6_900     # start suggesting a hedge past this
-HEDGE_TARGET_DELTA = 6_500      # hedge back to roughly this magnitude
+HEDGE_TRIGGER_DELTA = 5_000     # start suggesting a hedge past this
+HEDGE_TARGET_DELTA = 2_000      # hedge back to roughly this magnitude
 
 # --------------------------------------------------------------- dashboard
 REFRESH_SECONDS = 0.35

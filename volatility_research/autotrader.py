@@ -78,23 +78,18 @@ from rit_api import ApiException, RitClient
 # that the position should simply be at the limit, because the limit - not the
 # size of the gap - is what caps the payoff.
 #
-# RESEARCH FORK: these are deliberately past the point the base model stops at.
 # Entry and full-size are set below any real gap, so the book is always in the
 # market and always at the 1,000-contract net limit in the direction of the
 # view. This is the largest bet the case permits. See FINDINGS.md - it does NOT
 # raise the spread of outcomes, because the limit already bound before.
-ENTRY_VOL_EDGE = 0.0001
-FULL_SIZE_VOL_EDGE = 0.0002
+ENTRY_VOL_EDGE = 0.002
+FULL_SIZE_VOL_EDGE = 0.008
 # Close out once the gap decays below this - the maker has learned. Held below
 # the open-and-hold breakeven, since exiting costs more than sitting still.
-# RESEARCH FORK: never trim. The base model exits at 0.003 once the maker has
-# learned; this one holds the position and lets it cash-settle.
-EXIT_VOL_EDGE = 0.0
+EXIT_VOL_EDGE = 0.003
 # Stop opening new positions in the last fraction of the case: near expiry ATM
 # delta flips between +/-1 on tiny moves and hedging it becomes ruinous.
-# RESEARCH FORK: carry into expiry rather than standing down at tick 270, taking
-# the violent near-expiry gamma instead of avoiding it.
-NO_NEW_AFTER = 1.00
+NO_NEW_AFTER = 0.90
 # Deadband on rebalancing, in contracts per leg.
 #
 # The target size moves with the vol gap, and the gap jitters tick to tick as
