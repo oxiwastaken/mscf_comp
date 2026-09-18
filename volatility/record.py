@@ -49,6 +49,13 @@ def record(client, path, poll=0.2):
                             'case': case,
                             'securities': client.securities(),
                             'news': client.news(),
+                            # Mark-to-market NLV at every tick. Without this a
+                            # recording can only give a single number at
+                            # settlement, so questions like "where inside a heat
+                            # is the money made or lost - at the news releases,
+                            # or between them?" can only be inferred. With it
+                            # they are answerable directly from the tape.
+                            'trader': client.trader(),
                             'wall_time': time.time(),
                         }
                         handle.write(json.dumps(snapshot) + '\n')
