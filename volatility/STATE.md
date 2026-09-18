@@ -242,7 +242,91 @@ is profitable on the same recorded ticks, where the live run lost money. The
 difference between +$34k–89k in replay and −$15k live is almost entirely that
 one-tick lag.
 
-## Tail-week mode — still open, one heat is not enough
+## Four live heats — the strategy works
+
+| | Heat 1 | Heat 2 | Heat 3 | Heat 4 |
+|---|---|---|---|---|
+| **Final NLV** | −$15,154 | +$16,734 | +$40,494 | **+$112,634** |
+| Directional P&L | +$10,236 | +$83,865 | +$69,037 | +$141,889 |
+| Friction | $25,390 | $67,130 | $28,543 | $29,255 |
+| Option contracts | 10,540 | 28,444 | 11,340 | 12,264 |
+| RTM shares | 215,495 | 512,117 | 293,167 | 236,364 |
+| Rejections | many | 0 | 0 | 0 |
+
+Heat 1 → 2 was the hedge-lag fix plus recalibrated sizing. Heat 2 → 3 was the
+anti-churn work: option churn fell 60% and friction 57% while the directional
+edge held. Heat 4 ran the identical configuration and returned +$112,634 on a
++7.25 vol-point gap — the largest mispricing seen so far.
+
+**Friction is now stable at ~$29k regardless of opportunity** (heats 3 and 4:
+$28,543 and $29,255) while directional P&L varies with what the market offers.
+That is the right shape: cost is controlled, upside tracks the edge.
+
+Configuration that produced heats 3 and 4 (do not change without a reason):
+
+```
+TAIL_VOL_MODE       market
+ENTRY_VOL_EDGE      0.008     FULL_SIZE_VOL_EDGE  0.025
+EXIT_VOL_EDGE       0.003     GAP_SMOOTHING       0.15
+REBALANCE_MIN       25        REBALANCE_FRACTION  0.25
+STRIKE_SWITCH_DISTANCE 1.5    NO_NEW_AFTER        0.90
+```
+
+### Anti-churn changes that produced heat 3
+
+- **Gap smoothing** (`GAP_SMOOTHING = 0.15`). The weekly vol shock is a step
+  change and passes through; the cent-rounding jitter that was being traded does
+  not. Reaches ~80% of a step in ~10 ticks, far faster than the maker converges.
+- **Proportional deadband** (`REBALANCE_FRACTION = 0.25`). A flat 25-contract
+  threshold is 5% of a 500-lot book — hair-trigger. The ramp maps 1.7 vol points
+  onto 0–500 contracts, so a half-point flicker was resizing by ~150 lots.
+
+### The signal is genuinely predictive, not a directional artifact
+
+Heat 3 had volatility **falling** (30 → 24 → 11 → 20), `mean truth` −3.10%: the
+market was over-pricing vol, so selling was correct — the opposite of heats 1
+and 2, where vol rose monotonically.
+
+| Mode | Agreement | Correlation (heat 3, falling vol) |
+|---|---|---|
+| `market` | 65% | +0.82 |
+| `fixed` | 72% | +0.93 |
+| `persist` | 65% | +0.78 |
+
+All strongly positive in *both* directions of vol regime. This retires the
+earlier worry that a permanently-long-vol bias was being flattered by one-sided
+heats. **Inverting the trades would lose money** — checked directly after that
+hypothesis was raised.
+
+Volatility scale confirmed twice (`diagnose.py`): announced vs realised ratios
+average 1.001 and 0.972. The news numbers are annualised exactly as assumed.
+Per-week deviation (e.g. 24% announced vs 17% realised) is sampling error on a
+75-observation vol estimate, not model error.
+
+## Tail-week mode — `market` stays, and here is why
+
+Replayed across all three recorded heats (871 ticks):
+
+| Mode | Mean P&L | Worst heat | Mean RMSE |
+|---|---|---|---|
+| `market` | **$71,627** | $39,538 | 5.57% |
+| `fixed` | $49,321 | $34,387 | **3.73%** |
+| `persist` | $59,963 | **$41,510** | 6.06% |
+
+The measures still split: `fixed` forecasts most accurately, `market` earns
+most. Keeping `market`, for three reasons:
+
+1. **`fixed` depends on an arbitrary constant.** Its 25% prior happens to sit
+   near the average vol of all four heats (~20–21%). If Saturday's heat runs
+   unusually quiet or wild, `fixed` breaks and `market` adapts automatically.
+2. **`market` is the principled construction** — it deviates from the maker only
+   where we genuinely know more, which is exactly the case's stated edge.
+3. **It is the only mode validated live**, across four heats, most recently
+   +$112,634.
+
+Note the replay P&L column does **not** test the straddle strategy — `replay_pnl`
+still trades single options on dollar edge. Treat RMSE and the correlation
+figures as the strategy-independent measures; treat replay P&L as indicative.
 
 | Mode | Replay P&L | Forecast RMSE | Bias | Trades | Fees |
 |---|---|---|---|---|---|

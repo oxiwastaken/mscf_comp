@@ -81,6 +81,23 @@ NO_NEW_AFTER = 0.90
 # commission each way to hold what is effectively the same position. Only trade
 # when the gap between target and holding is worth the fees.
 REBALANCE_MIN = 25
+# Rebalance only when the position is off target by this fraction of itself.
+#
+# A flat 25-contract deadband is far too tight once positions reach the hundreds.
+# Live heat 2 churned 28,444 option contracts for a book that peaked near 500 -
+# roughly 50x turnover - and paid $56,888 in option commission and spread to do
+# it, against $83,865 of directional profit. The ramp maps 1.7 vol points onto
+# 0-500 contracts, so a half-point flicker in the gap resizes the book by ~150
+# lots. Scaling the deadband with position size stops that.
+REBALANCE_FRACTION = 0.25
+# Smoothing applied to the vol gap before it drives sizing.
+#
+# The gap jitters tick to tick because the maker's quotes round to the cent, and
+# that jitter was being traded. The real signal is a step change at each weekly
+# shock, which survives smoothing; the rounding noise does not. At 0.15 the
+# filter reaches ~80% of a step in about ten ticks - far quicker than the maker
+# converges, so no edge is given up.
+GAP_SMOOTHING = 0.15
 # How far RTM must wander from the working strike before we move the position.
 #
 # Switching strike is expensive: it closes one straddle and opens another,
@@ -111,6 +128,7 @@ class AutoTrader:
         self.orders_sent = 0
         self._last_tick = -1
         self._target_strike = None
+        self._gap_ema = None
 
     # ------------------------------------------------------------------ util
     def log(self, text):
@@ -228,7 +246,13 @@ class AutoTrader:
         if not chain['live'] or not chain['forecast'] or not chain['market_avg_iv']:
             return True
 
-        gap = chain['forecast'] - chain['market_avg_iv']
+        raw_gap = chain['forecast'] - chain['market_avg_iv']
+        # Smooth before sizing. The weekly vol shock is a step change and passes
+        # straight through; the cent-rounding jitter that was being traded does
+        # not. Seeded on the first reading so there is no warm-up lag.
+        self._gap_ema = raw_gap if self._gap_ema is None else (
+            GAP_SMOOTHING * raw_gap + (1 - GAP_SMOOTHING) * self._gap_ema)
+        gap = self._gap_ema
         _gross_limit, net_limit = self.option_limits()
 
         strike, by_strike = self.pick_strike(chain)
@@ -251,7 +275,7 @@ class AutoTrader:
             self.log(f'tick {tick:>3}/{total}  spot {chain["spot"]:.2f}  '
                      f'fcst {chain["forecast"] * 100:5.2f}%  '
                      f'mkt {chain["market_avg_iv"] * 100:5.2f}%  '
-                     f'gap {gap * 100:+5.2f}%  '
+                     f'gap {gap * 100:+5.2f}% (raw {raw_gap * 100:+5.2f}%)  '
                      f'K{strike:.0f}  held {held:+.0f}  target {target:+d}'
                      + ('  [late]' if late else ''))
 
@@ -301,7 +325,10 @@ class AutoTrader:
             change = int(target - leg['position'])
             if change == 0:
                 continue
-            if target != 0 and abs(change) < REBALANCE_MIN:
+            threshold = max(REBALANCE_MIN,
+                            REBALANCE_FRACTION * max(abs(target),
+                                                     abs(leg['position'])))
+            if target != 0 and abs(change) < threshold:
                 continue
             action = 'BUY' if change > 0 else 'SELL'
             self.send(leg['ticker'], action, abs(change),
