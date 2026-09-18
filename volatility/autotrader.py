@@ -335,14 +335,7 @@ class AutoTrader:
                      or self._pending_resize or target == 0)
 
         if may_trade:
-            # Order matters. Close the strikes we are leaving FIRST: the net
-            # option limit is enforced on submission, so holding the old
-            # straddle while opening the new one gets the new one rejected
-            # outright. Seen live at tick 236 - a 303-lot of K52 bounced off the
-            # limit because 404 lots of K50 were still on the book, and only
-            # filled a tick later once K50 had been closed.
-            self.close_other_strikes(chain, strike)
-            self.rebalance(call, put, target)
+            self.execute(chain, strike, call, put, target)
             self._pending_resize = False
             hedge_target = target
         else:
@@ -353,8 +346,127 @@ class AutoTrader:
         # Hedge the delta we are about to HAVE, not the one we had before
         # trading. Hedging the stale figure and correcting next tick is what
         # produced BUY 12,369 RTM followed one second later by SELL 12,381.
+        # After execute() this is normally a no-op; it still runs so a rejected
+        # or partially filled chunk cannot leave the book unhedged.
         self.hedge(chain, strike, hedge_target)
         return True
+
+    def option_orders(self, chain, strike, call, put, target):
+        """
+        This tick's option orders as [(row, signed change)], closes first.
+
+        Order matters. The strikes we are leaving go FIRST: the net option limit
+        is enforced on submission, so holding the old straddle while opening the
+        new one gets the new one rejected outright. Seen live at tick 236 - a
+        303-lot of K52 bounced off the limit because 404 lots of K50 were still
+        on the book, and only filled a tick later once K50 had been closed.
+        """
+        orders = []
+        for row in chain['rows']:
+            if row['strike'] != strike and row['position']:
+                orders.append((row, -int(row['position'])))
+        for leg in (call, put):
+            change = int(target - leg['position'])
+            if change == 0:
+                continue
+            # The deadband is skipped when target is zero: closing out is always
+            # worth doing in full, however small the remainder.
+            threshold = max(REBALANCE_MIN,
+                            REBALANCE_FRACTION * max(abs(target),
+                                                     abs(leg['position'])))
+            if target != 0 and abs(change) < threshold:
+                continue
+            orders.append((leg, change))
+        return orders
+
+    def execute(self, chain, strike, call, put, target):
+        """
+        Send the option orders in chunks, hedging BETWEEN them.
+
+        The delta penalty accrues per second, not per tick. Sending every option
+        order and only then hedging leaves the book carrying the whole un-hedged
+        delta for about a second - ten chunked option orders go out before the
+        RTM hedge does. Measured live across ten heats: $86,156 of penalty, peak
+        |delta| 47,713.
+
+        A straddle is only delta-neutral AT the money, so the spike is worst
+        exactly when a resize matters most. Seen at tick 225: selling 500
+        RTM52C and 500 RTM52P with spot at 51.23 put the book at +47,713 delta,
+        because the in-the-money put carries about 0.7 delta. That one resize
+        cost $4,071.
+
+        Interleaving costs nothing. Fees here are charged per SHARE, not per
+        order, so hedging in ten pieces costs exactly what hedging in one does -
+        and the rate limit is 50 orders a second against the handful we send.
+        """
+        delta = float(chain['portfolio_delta'])
+        underlying = float(chain['underlying_position'])
+        for row, change in self.option_orders(chain, strike, call, put, target):
+            action = 'BUY' if change > 0 else 'SELL'
+            remaining = abs(change)
+            step = self.chunk_for(row)
+            while remaining > 0:
+                lot = min(step, remaining)
+                self.send(row['ticker'], action, lot, config.MAX_TRADE_OPTIONS)
+                remaining -= lot
+                if row['delta'] is not None:
+                    signed = lot if change > 0 else -lot
+                    delta += signed * row['delta'] * config.CONTRACT_MULTIPLIER
+                delta, underlying = self.hedge_running(delta, underlying)
+        return delta
+
+    def chunk_for(self, row):
+        """
+        Contracts to send at once, so ONE chunk cannot breach the delta band.
+
+        The maximum trade size is 100 contracts, but 100 contracts is not a
+        fixed amount of delta. An in-the-money leg carries most of a delta per
+        share, so a single 100-lot of RTM52P at 0.79 delta moves the book 7,900
+        - past the entire +/-7,000 limit on its own, before any hedge can
+        follow it. Interleaving alone therefore is not enough; the chunk has to
+        be small enough that the hedge can keep up.
+
+        Budget each chunk the room between the hedge target and the limit, with
+        a margin. Low-delta legs still go 100 at a time; only the legs that can
+        actually breach get cut finer.
+        """
+        delta = abs(row.get('delta') or 0.0)
+        budget = (self.delta_limit - config.HEDGE_TARGET_DELTA) * 0.8
+        if delta <= 0 or budget <= 0:
+            return config.MAX_TRADE_OPTIONS
+        per_contract = delta * config.CONTRACT_MULTIPLIER
+        return max(1, min(config.MAX_TRADE_OPTIONS, int(budget / per_contract)))
+
+    def hedge_running(self, delta, underlying):
+        """
+        Hedge a running delta mid-resize. Returns the updated (delta, position).
+
+        RTM carries one delta per share, so the share trade moves the portfolio
+        delta one for one. Tracking both locally avoids re-reading positions
+        from the API between chunks, which would cost more time than it saves.
+        """
+        suggestion = vol_engine.hedge_suggestion(delta, limit=self.delta_limit)
+        if not suggestion['action'] or suggestion['quantity'] <= 0:
+            return delta, underlying
+        quantity = suggestion['quantity']
+        signed = quantity if suggestion['action'] == 'BUY' else -quantity
+        # Test the RESULTING position, not the sum of magnitudes - a hedge that
+        # unwinds an existing position never threatens the limit however large
+        # that position is.
+        if abs(underlying + signed) > config.LIMIT_RTM_GROSS:
+            room = int(max(config.LIMIT_RTM_GROSS - abs(underlying), 0))
+            if room <= 0:
+                self.log(f'  CANNOT HEDGE: delta {delta:+,.0f} '
+                         f'but RTM position is at its limit')
+                return delta, underlying
+            quantity = min(quantity, room)
+            signed = quantity if suggestion['action'] == 'BUY' else -quantity
+        if suggestion['over_limit']:
+            self.log(f'  delta {delta:+,.0f} OVER LIMIT, '
+                     f'-${suggestion["penalty_per_second"]:,.0f}/s')
+        self.send(config.UNDERLYING, suggestion['action'], quantity,
+                  config.MAX_TRADE_RTM)
+        return delta + signed, underlying + signed
 
     def projected_delta(self, chain, strike, target):
         """
@@ -372,44 +484,6 @@ class AutoTrader:
             position = target if row['strike'] == strike else 0
             total += position * row['delta'] * config.CONTRACT_MULTIPLIER
         return total
-
-    def rebalance(self, call, put, target):
-        """
-        Move each leg toward the target, trading only the difference.
-
-        Legs are handled independently rather than as a pair, so a rejected or
-        partially filled order on one leg self-corrects on the next tick instead
-        of leaving the straddle permanently lopsided.
-
-        The deadband is skipped when target is zero: closing out is always worth
-        doing in full, however small the remainder.
-        """
-        for leg in (call, put):
-            change = int(target - leg['position'])
-            if change == 0:
-                continue
-            threshold = max(REBALANCE_MIN,
-                            REBALANCE_FRACTION * max(abs(target),
-                                                     abs(leg['position'])))
-            if target != 0 and abs(change) < threshold:
-                continue
-            action = 'BUY' if change > 0 else 'SELL'
-            self.send(leg['ticker'], action, abs(change),
-                      config.MAX_TRADE_OPTIONS)
-
-    def close_other_strikes(self, chain, keep_strike):
-        """
-        Flatten option positions away from the working strike.
-
-        Stale legs at other strikes drift in delta without contributing the vega
-        we actually want, which is how a book turns into an unhedgeable mess.
-        """
-        for row in chain['rows']:
-            if row['strike'] == keep_strike or not row['position']:
-                continue
-            action = 'SELL' if row['position'] > 0 else 'BUY'
-            self.send(row['ticker'], action, abs(row['position']),
-                      config.MAX_TRADE_OPTIONS)
 
     def hedge(self, chain, strike=None, target=None):
         delta = (chain['portfolio_delta'] if strike is None

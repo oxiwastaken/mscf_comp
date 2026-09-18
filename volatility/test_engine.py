@@ -404,39 +404,106 @@ check('empty book allows the full straddle',
       t.hedgeable_legs(flat_chain) >= 500)
 
 
-def leg(ticker, strike, flag, position=0, tradeable=True):
+def leg(ticker, strike, flag, position=0, tradeable=True, delta=0.0):
     return {'ticker': ticker, 'strike': float(strike), 'flag': flag,
-            'position': position, 'tradeable': tradeable}
+            'position': position, 'tradeable': tradeable, 'delta': delta}
 
 
-t = make_trader()
+def orders_for(call, put, target, rows=None, strike=50.0):
+    """The option orders one tick would send, as [(ticker, signed change)]."""
+    chain = {'rows': rows if rows is not None else [call, put]}
+    trader = make_trader()
+    return [(row['ticker'], change)
+            for row, change in trader.option_orders(chain, strike, call, put,
+                                                    target)]
+
+
 call, put = leg('RTM50C', 50, 'c', 300), leg('RTM50P', 50, 'p', 300)
-t.rebalance(call, put, 310)
-check('a change inside the deadband is not traded', t.client.sent == [],
-      f'sent {t.client.sent}')
+check('a change inside the deadband is not traded',
+      orders_for(call, put, 310) == [], f'got {orders_for(call, put, 310)}')
 
-t = make_trader()
-t.rebalance(leg('RTM50C', 50, 'c', 300), leg('RTM50P', 50, 'p', 300), 400)
 check('a change past the deadband trades both legs',
-      t.client.sent == [('RTM50C', 'BUY', 100), ('RTM50P', 'BUY', 100)],
-      f'sent {t.client.sent}')
+      orders_for(leg('RTM50C', 50, 'c', 300), leg('RTM50P', 50, 'p', 300), 400)
+      == [('RTM50C', 100), ('RTM50P', 100)])
 
-t = make_trader()
-t.rebalance(leg('RTM50C', 50, 'c', 5), leg('RTM50P', 50, 'p', 5), 0)
 check('closing out ignores the deadband',
-      t.client.sent == [('RTM50C', 'SELL', 5), ('RTM50P', 'SELL', 5)],
-      f'sent {t.client.sent}')
+      orders_for(leg('RTM50C', 50, 'c', 5), leg('RTM50P', 50, 'p', 5), 0)
+      == [('RTM50C', -5), ('RTM50P', -5)])
 
-t = make_trader()
-t.rebalance(leg('RTM50C', 50, 'c', 300), leg('RTM50P', 50, 'p', 0), 300)
 check('a lopsided straddle self-corrects on the lagging leg only',
-      t.client.sent == [('RTM50P', 'BUY', 300)], f'sent {t.client.sent}')
+      orders_for(leg('RTM50C', 50, 'c', 300), leg('RTM50P', 50, 'p', 0), 300)
+      == [('RTM50P', 300)])
+
+check('short straddle sells both legs',
+      orders_for(leg('RTM50C', 50, 'c', 0), leg('RTM50P', 50, 'p', 0), -200)
+      == [('RTM50C', -200), ('RTM50P', -200)])
+
+# Strikes being left are closed FIRST - the net option limit is enforced on
+# submission, so the old straddle must be off the book before the new one goes on.
+stale = leg('RTM52C', 52, 'c', 200)
+check('strikes being left are closed before the new one is opened',
+      orders_for(leg('RTM50C', 50, 'c', 0), leg('RTM50P', 50, 'p', 0), 100,
+                 rows=[stale, leg('RTM50C', 50, 'c', 0),
+                       leg('RTM50P', 50, 'p', 0)])
+      == [('RTM52C', -200), ('RTM50C', 100), ('RTM50P', 100)])
+
+# ------------------------------------------------ interleaved hedging
+# The property that matters is not the final delta but the delta DURING the
+# resize: the penalty accrues per second, and a full resize is ten chunked
+# option orders. Replaying the order stream reconstructs what the book actually
+# carried between chunks.
+print('\ninterleaved hedging')
+
+
+def peak_delta_during(trader, rows):
+    """Largest |delta| the book carried while its orders were going out."""
+    by_ticker = {r['ticker']: r for r in rows}
+    delta, peak = 0.0, 0.0
+    for ticker, action, quantity in trader.client.sent:
+        signed = quantity if action == 'BUY' else -quantity
+        if ticker == config.UNDERLYING:
+            delta += signed
+        else:
+            delta += signed * by_ticker[ticker]['delta'] * config.CONTRACT_MULTIPLIER
+        peak = max(peak, abs(delta))
+    return peak
+
+
+# The live failure: selling 500 of each leg at K52 with spot at 51.23. The
+# in-the-money put carries ~0.79 delta against the call's ~0.21, so a short
+# straddle is nowhere near neutral - the book hit +47,713 and paid $4,071 for
+# that one second.
+k52c = leg('RTM52C', 52, 'c', 0, delta=0.21)
+k52p = leg('RTM52P', 52, 'p', 0, delta=-0.79)
+rows = [k52c, k52p]
+chain = {'rows': rows, 'portfolio_delta': 0.0, 'underlying_position': 0.0,
+         'spot': 51.23}
 
 t = make_trader()
-t.rebalance(leg('RTM50C', 50, 'c', 0), leg('RTM50P', 50, 'p', 0), -200)
-check('short straddle sells both legs',
-      t.client.sent == [('RTM50C', 'SELL', 200), ('RTM50P', 'SELL', 200)],
+t.execute(chain, 52.0, k52c, k52p, -500)
+peak = peak_delta_during(t, rows)
+check('delta stays inside the band THROUGHOUT a full-size resize',
+      peak <= config.DELTA_LIMIT, f'peaked at {peak:,.0f}')
+check('the resize still sends the whole option position',
+      sum(q for tkr, _a, q in t.client.sent if tkr != config.UNDERLYING) == 1000,
+      f'sent {sum(q for tkr, _a, q in t.client.sent if tkr != config.UNDERLYING)}')
+check('hedges are interleaved, not left to the end',
+      any(tkr == config.UNDERLYING for tkr, _a, _q in t.client.sent[:-1]),
       f'sent {t.client.sent}')
+
+# Without interleaving the same resize would have breached badly - this pins the
+# size of the problem being solved rather than just that it is solved.
+check('the un-interleaved equivalent would have breached',
+      500 * 0.79 * config.CONTRACT_MULTIPLIER - 500 * 0.21
+      * config.CONTRACT_MULTIPLIER > config.DELTA_LIMIT)
+
+t = make_trader()
+t.execute({'rows': rows, 'portfolio_delta': 0.0,
+           'underlying_position': config.LIMIT_RTM_GROSS, 'spot': 51.23},
+          52.0, k52c, k52p, -500)
+check('a hedge that would breach the RTM limit is capped, not abandoned',
+      all(q <= config.MAX_TRADE_RTM for tkr, _a, q in t.client.sent
+          if tkr == config.UNDERLYING))
 
 # The hedge must be computed from the position we are ABOUT to hold, not the
 # one we held before this tick's option trades. Hedging the stale figure and
