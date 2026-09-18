@@ -5,6 +5,62 @@ Work tracker for the RITCx Volatility Trading Case build.
 
 ---
 
+## THE GOAL — read this first
+
+**Average P&L across all 10 competition heats at or above $400,000.**
+Guiding theme: **"go big or go home (within reason)."** Optimise for expected
+P&L, not for safety — but stay inside the case's hard limits, which are enforced
+server-side and reject offending orders outright.
+
+Current standing: **+$76,003 average** over the six heats since the hedge fix
+(best +$112,634). The goal needs roughly **5x**.
+
+### The ceiling, and why it is where it is
+
+The binding constraint is the **1,000-contract NET option limit**. A full-size
+ATM straddle is exactly 1,000 net contracts. Its vega:
+
+```
+vega per share per vol point  = S · φ(d₁) · √T
+                              ≈ 50 × 0.399 × 0.289  ≈ 0.0576   (T = 1/12)
+per contract                  ≈ $5.76
+at the 1,000-contract limit   ≈ $5,760 per volatility point
+```
+
+So **$400,000 requires capturing ~69 volatility points of convergence per
+heat.** Observed gaps have been 7–11 points across four news releases. Even
+capturing every gap perfectly and in full lands nearer **$150–200k**.
+
+**Honest assessment: $400k average is very likely above the structural ceiling
+at the current position limit.** It is worth chasing as a stretch target — the
+levers below could plausibly double or triple today's number — but do not
+mistake hitting $200k for failure, and do not breach limits reaching for it
+(orders that exceed them are rejected, and heat 1 showed an unhedgeable book
+costs $2,002/second).
+
+### Levers, largest first
+
+1. **Use gross capacity, not just net.** GROSS limit is 2,500 while NET is
+   1,000. Long ~1,750 ATM contracts against short ~750 **low-vega wings** keeps
+   net at 1,000 while lifting vega roughly **55%** (the wings consume net
+   capacity cheaply because their vega is tiny — the same property that makes
+   them useless to trade on their own). **Biggest single lever, not yet built.**
+2. **Reach full size sooner.** `FULL_SIZE_VOL_EDGE = 0.025` means a 2.5-point
+   gap is needed for max position. Most observed gaps are 1–2 points, so the
+   book is often half-sized during real edge.
+3. **Gamma-aware hedge band.** Friction is down to ~$15k/heat but is now
+   dominated by share hedging (heat 7: $10,184 of $15,397). Widen the band when
+   gamma is low, tighten near expiry.
+4. **Trade later into the heat.** `NO_NEW_AFTER = 0.90` stops new positions at
+   tick 270; the final news release may still be tradeable.
+5. **Forecast quality.** `fixed` beat `market` on RMSE (3.73% vs 5.57%). A
+   hybrid — market-anchored but shrunk toward the observed vol mean — is untested.
+
+**Test every one of these with `backtest.py` on the recorded heats before
+trading it live.** Seven recordings exist. Same-heat comparison is the only
+valid test; NLV across different heats is meaningless (identical code produced
+−$15k and +$113k).
+
 ## Topology phase
 
 `VERIFIED AGAINST A LIVE PRACTICE HEAT.` 99/99 offline tests pass.
@@ -242,25 +298,51 @@ is profitable on the same recorded ticks, where the live run lost money. The
 difference between +$34k–89k in replay and −$15k live is almost entirely that
 one-tick lag.
 
-## Four live heats — the strategy works
+## Seven live heats — six consecutive profitable
 
-| | Heat 1 | Heat 2 | Heat 3 | Heat 4 |
-|---|---|---|---|---|
-| **Final NLV** | −$15,154 | +$16,734 | +$40,494 | **+$112,634** |
-| Directional P&L | +$10,236 | +$83,865 | +$69,037 | +$141,889 |
-| Friction | $25,390 | $67,130 | $28,543 | $29,255 |
-| Option contracts | 10,540 | 28,444 | 11,340 | 12,264 |
-| RTM shares | 215,495 | 512,117 | 293,167 | 236,364 |
-| Rejections | many | 0 | 0 | 0 |
+| Heat | NLV | Friction | Opt contracts | RTM shares | Config |
+|---|---|---|---|---|---|
+| 1 | −$15,154 | $25,390 | 10,540 | 215,495 | stale-delta hedge (broken) |
+| 2 | +$16,734 | $67,130 | 28,444 | 512,117 | hedge fixed, sizing recalibrated |
+| 3 | +$40,494 | $28,543 | 11,340 | 293,167 | + anti-churn |
+| 4 | +$112,634 | $29,255 | 12,264 | 236,364 | same |
+| 5 | +$109,378 | $22,456 | 8,044 | 318,377 | same |
+| 6 | +$81,126 | $21,696 | 8,952 | 189,576 | **+ news-gated** |
+| 7 | **+$95,650** | **$15,397** | **5,092** | 260,639 | news-gated |
 
-Heat 1 → 2 was the hedge-lag fix plus recalibrated sizing. Heat 2 → 3 was the
-anti-churn work: option churn fell 60% and friction 57% while the directional
-edge held. Heat 4 ran the identical configuration and returned +$112,634 on a
-+7.25 vol-point gap — the largest mispricing seen so far.
+Mean of the six since the hedge fix: **+$76,003**.
 
-**Friction is now stable at ~$29k regardless of opportunity** (heats 3 and 4:
-$28,543 and $29,255) while directional P&L varies with what the market offers.
-That is the right shape: cost is controlled, upside tracks the edge.
+Progression: heat 1→2 was the stale-delta hedge fix plus recalibrated sizing.
+2→3 was anti-churn (option churn −60%, friction −57%). 5→6 was news-gating,
+which cut option *sends* from 82 to 30 and RTM sends from 53 to 21. Heat 7 hit
+the lowest friction of any heat at $15,397 on just 18 option sends.
+
+**Do not compare NLV across heats to judge a change.** Identical code produced
+−$15k and +$113k on different heats; opportunity varies enormously. Only the
+same-heat backtest comparison is valid.
+
+## Rebalancing policy — settled on seven heats
+
+Hypothesis (from watching live runs): the money is made at each news release and
+the tick-by-tick trading in between only bleeds. Tested with `backtest.py`,
+which replays the real straddle strategy over recorded heats:
+
+| Policy | Mean P&L | Worst heat |
+|---|---|---|
+| `continuous` | $77,544 | $18,981 |
+| `deadband-40` | $86,366 | $19,002 |
+| `deadband-60` | $84,458 | $15,845 |
+| `deadband-80` | $65,472 | $13,321 |
+| **`news`** | **$94,688** | **$22,990** |
+| `news+band` | $92,937 | $20,835 |
+
+`news` won in **every individual heat**, and has the best worst case. Raising the
+deadband instead captures roughly a third of the benefit; 80% goes backwards.
+
+**Only ~$5k of the gain is saved commission.** The larger part: as the maker
+converges toward our forecast the gap shrinks, and continuous rebalancing reacts
+by *trimming* — selling out of the very convergence that pays us. Holding to the
+next release captures the whole move.
 
 Configuration that produced heats 3 and 4 (do not change without a reason):
 
