@@ -154,6 +154,7 @@ def run(dry_run=False):
     trader = recorder = None
     tag = None
     seen_active = False
+    last_tick = 0
 
     try:
         while True:
@@ -179,11 +180,16 @@ def run(dry_run=False):
 
             status = case.get('status')
             if status == 'ACTIVE':
+                # Remember the last live tick. By the time the case reports
+                # STOPPED it has already reset to 0, so reading it then records
+                # nothing useful.
+                last_tick = case.get('tick', 0) or last_tick
                 if not seen_active:
                     seen_active = True
                     heat_number += 1
                     log(f'heat {heat_number} started '
-                        f'({case.get("ticks_per_period")} ticks)')
+                        f'({case.get("ticks_per_period")} ticks, '
+                        f'joined at tick {case.get("tick", 0)})')
             elif seen_active:
                 # Settled. Read NLV immediately - it resets when the next heat
                 # is loaded, so this is the only reliable moment to capture it.
@@ -203,7 +209,7 @@ def run(dry_run=False):
                     'shares': stats['shares'],
                     'opt_sends': stats['opt_sends'],
                     'rtm_sends': stats['rtm_sends'],
-                    'ticks': case.get('tick', 0),
+                    'ticks': last_tick,
                     'log': f'auto_{tag}.log',
                 }
                 append_result(row)
@@ -216,6 +222,7 @@ def run(dry_run=False):
                 stop(trader)
                 stop(recorder)
                 trader = recorder = None
+                last_tick = 0
                 time.sleep(1.0)
                 continue
 
