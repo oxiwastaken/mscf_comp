@@ -345,9 +345,15 @@ option trades. It hedged the pre-trade figure, then corrected a tick later:
 23:37:37  SENT BUY   9,088 RTM
 ```
 
-That one-tick lag accounts for essentially all 215,495 shares. Fixed with
-`projected_delta()`, which hedges the position the tick is about to *have*.
-Fills are immediate here (`execution_delay_ms: 0`), so the projection is exact.
+That one-tick lag accounts for essentially all 215,495 shares. Fixed at the time
+with `projected_delta()`, which hedged the position the tick was about to *have*.
+
+**Superseded.** Change 1 replaced the projection with `hedge_running()` inside
+`execute()`: the hedge now goes out *between* the option chunks, so there is
+nothing left to project, and every tick ends with an unconditional backstop
+hedge. `projected_delta()` and the old `hedge()` were deleted on 18 Sep once the
+last caller went away — one hedging entry point, no parallel implementation to
+drift.
 
 **2. Opened the new strike before closing the old one.** The net option limit is
 enforced on submission, so carrying both straddles at once got the new one

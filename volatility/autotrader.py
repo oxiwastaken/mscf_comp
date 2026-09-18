@@ -198,18 +198,30 @@ class AutoTrader:
         print(f'{time.strftime("%H:%M:%S")}  {text}', flush=True)
 
     def send(self, ticker, action, quantity, max_chunk):
+        """
+        Send an order. Returns True if the book actually moved.
+
+        The return value is load-bearing, not decoration. Callers track delta
+        locally between API reads, and a rejected order moves no delta: a chunk
+        that bounces off the net option limit - the rejection option_orders()
+        exists to avoid - would otherwise be counted as filled and hedged
+        against exposure the book never acquired. A dry run reports True so the
+        simulated book follows the same path the live one would.
+        """
         quantity = int(quantity)
         if quantity <= 0:
-            return
+            return False
         if not self.live:
             self.log(f'  DRY  {action:<4} {quantity:>6,} {ticker}')
-            return
+            return True
         try:
             self.client.send_in_chunks(ticker, action, quantity, max_chunk)
             self.orders_sent += 1
             self.log(f'  SENT {action:<4} {quantity:>6,} {ticker}')
+            return True
         except (ApiException, ValueError) as exc:
             self.log(f'  REJECTED {action} {quantity} {ticker}: {exc}')
+            return False
 
     def option_limits(self):
         """Live gross/net option limits and current usage."""
@@ -313,6 +325,16 @@ class AutoTrader:
         chain = vol_engine.build_chain(securities, tick, total, week_vols,
                                        mode=self.mode)
         if not chain['live'] or not chain['forecast'] or not chain['market_avg_iv']:
+            # No view to trade on - but an un-hedged delta still costs money
+            # every second, so hedge what the API just reported before bailing.
+            # `market_avg_iv` is None whenever no row survives the vega / IV
+            # spread filter, which is exactly what happens late in a heat as the
+            # options decay: the tick we would skip is the tick where a short
+            # straddle's gamma is most violent. Guarded on `live` so nothing is
+            # fired against the dead two-sided-zero quotes seen between heats.
+            if chain['live']:
+                self.hedge_running(float(chain['portfolio_delta']),
+                                   float(chain['underlying_position']))
             return True
 
         raw_gap = chain['forecast'] - chain['market_avg_iv']
@@ -327,7 +349,10 @@ class AutoTrader:
         previous_strike = self._target_strike
         strike, by_strike = self.pick_strike(chain)
         if strike is None:
-            self.hedge(chain)
+            # Nothing tradeable to work with; hedge and wait. One hedging entry
+            # point, so this path cannot drift out of step with the backstop.
+            self.hedge_running(float(chain['portfolio_delta']),
+                               float(chain['underlying_position']))
             return True
         # Moving strike is new information about where the position belongs, so
         # it earns a resize even without a news release.
@@ -453,8 +478,9 @@ class AutoTrader:
                 trigger=max(config.HEDGE_TARGET_DELTA,
                             self.delta_limit * 0.9 - abs(moves)))
             action = 'BUY' if lot > 0 else 'SELL'
-            self.send(row['ticker'], action, abs(lot), config.MAX_TRADE_OPTIONS)
-            delta += moves
+            if self.send(row['ticker'], action, abs(lot),
+                         config.MAX_TRADE_OPTIONS):
+                delta += moves
             delta, underlying = self.hedge_running(delta, underlying)
         return delta, underlying
 
@@ -555,48 +581,12 @@ class AutoTrader:
         if suggestion['over_limit']:
             self.log(f'  delta {delta:+,.0f} OVER LIMIT, '
                      f'-${suggestion["penalty_per_second"]:,.0f}/s')
-        self.send(config.UNDERLYING, suggestion['action'], quantity,
-                  config.MAX_TRADE_RTM)
+        if not self.send(config.UNDERLYING, suggestion['action'], quantity,
+                         config.MAX_TRADE_RTM):
+            # Rejected: the shares were never bought, so the delta is unchanged
+            # and the next chunk should try the same hedge again.
+            return delta, underlying
         return delta + signed, underlying + signed
-
-    def projected_delta(self, chain, strike, target):
-        """
-        Portfolio delta as it will stand once this tick's option trades land.
-
-        Every leg at the working strike goes to `target`; everything else is
-        being closed, so it contributes nothing. Fills are immediate in this
-        case (execution_delay_ms is 0), so the projection is what the next tick
-        will actually observe.
-        """
-        total = float(chain['underlying_position'])
-        for row in chain['rows']:
-            if row['delta'] is None:
-                continue
-            position = target if row['strike'] == strike else 0
-            total += position * row['delta'] * config.CONTRACT_MULTIPLIER
-        return total
-
-    def hedge(self, chain, strike=None, target=None):
-        delta = (chain['portfolio_delta'] if strike is None
-                 else self.projected_delta(chain, strike, target))
-        suggestion = vol_engine.hedge_suggestion(delta, limit=self.delta_limit)
-        if not suggestion['action'] or suggestion['quantity'] <= 0:
-            return
-        quantity = suggestion['quantity']
-        signed = quantity if suggestion['action'] == 'BUY' else -quantity
-        projected = chain['underlying_position'] + signed
-        if abs(projected) > config.LIMIT_RTM_GROSS:
-            allowed = config.LIMIT_RTM_GROSS - abs(chain['underlying_position'])
-            if allowed <= 0:
-                self.log(f'  CANNOT HEDGE: delta {delta:+,.0f} '
-                         f'but RTM position is at its limit')
-                return
-            quantity = min(quantity, allowed)
-        if suggestion['over_limit']:
-            self.log(f'  delta {delta:+,.0f} OVER LIMIT, '
-                     f'-${suggestion["penalty_per_second"]:,.0f}/s')
-        self.send(config.UNDERLYING, suggestion['action'], quantity,
-                  config.MAX_TRADE_RTM)
 
     def run(self):
         mode = 'LIVE' if self.live else 'DRY RUN'

@@ -470,13 +470,23 @@ check('opening from flat uses the target',
 print('\nthe hedge backstop')
 
 
+BACKSTOP_TICK = 240            # week 4 of 4, before the NO_NEW_AFTER cutoff
+
+
 class StepClient(FakeClient):
     """Enough of the API for one full step() through a held position."""
 
-    def __init__(self, securities, tick=150):
+    def __init__(self, securities, tick=BACKSTOP_TICK, news=None):
         super().__init__()
         self._securities = securities
         self._tick = tick
+        # The announcement has to cover the week the tick is IN, or it says
+        # nothing about the remaining life of the options and the forecast
+        # silently falls back to the market's own average - a zero gap, which
+        # is a different scenario from the one these tests are about.
+        self._news = [{'tick': tick, 'headline': 'x',
+                       'body': 'The realized volatility of RTM for this '
+                               'week will be 20%'}] if news is None else news
 
     def case(self):
         return {'tick': self._tick, 'ticks_per_period': 300, 'status': 'ACTIVE'}
@@ -485,11 +495,13 @@ class StepClient(FakeClient):
         return self._securities
 
     def news(self):
-        return [{'tick': 1, 'headline': 'x',
-                 'body': 'The realized volatility of RTM for this week will be 40%'}]
+        return self._news
 
 
-def option(ticker, strike, flag, position, bid, ask):
+def option(ticker, position, bid, ask):
+    # No strike or flag argument: build_chain parses both back out of the
+    # ticker, so passing them separately would only invite a fixture that
+    # looks like it configures something it does not.
     return {'ticker': ticker, 'type': 'OPTION', 'size': 100, 'position': position,
             'bid': bid, 'ask': ask, 'last': (bid + ask) / 2, 'nlv': 0.0,
             'vwap': 0.0, 'unrealized': 0.0, 'realized': 0.0,
@@ -497,25 +509,84 @@ def option(ticker, strike, flag, position, bid, ask):
             'is_tradeable': True}
 
 
+def share_row(position, spot):
+    return {'ticker': 'RTM', 'type': 'STOCK', 'size': 1, 'position': position,
+            'bid': round(spot - 0.01, 2), 'ask': round(spot + 0.01, 2),
+            'last': spot, 'nlv': 0.0, 'vwap': 0.0, 'unrealized': 0.0,
+            'realized': 0.0, 'limits': [{'name': 'Limit-ETF'}],
+            'trading_fee': 0.01, 'is_tradeable': True}
+
+
+def straddle_book(market_iv, position=-500, spot=50.68, strike=49.0,
+                  underlying=2708, width=0.02, tick=BACKSTOP_TICK):
+    """
+    A held straddle, quoted at `market_iv` so the vol gap is known exactly.
+
+    Pricing the legs rather than hardcoding two cent figures is what makes the
+    gap in these tests a chosen number instead of an accident of the fixture.
+    """
+    t_years = vol_engine.time_to_expiry(tick, 300)
+    book = [share_row(underlying, spot)]
+    for flag, suffix in (('c', 'C'), ('p', 'P')):
+        mid = black_scholes(flag, spot, strike, t_years,
+                            config.RISK_FREE_RATE, market_iv)
+        book.append(option(f'RTM{strike:.0f}{suffix}', position,
+                           round(mid - width / 2, 2), round(mid + width / 2, 2)))
+    return book
+
+
 # The live failure, reduced: a SHORT straddle at K49 that is already at target,
-# with spot far above the strike so its delta is enormous. Nothing needs
-# trading, so execute() has no chunks - and before the backstop, that meant the
-# tick hedged nothing at all.
-securities = [
-    {'ticker': 'RTM', 'type': 'STOCK', 'size': 1, 'position': 2708,
-     'bid': 50.67, 'ask': 50.69, 'last': 50.68, 'nlv': 0.0, 'vwap': 0.0,
-     'unrealized': 0.0, 'realized': 0.0, 'limits': [{'name': 'Limit-ETF'}],
-     'trading_fee': 0.01, 'is_tradeable': True},
-    option('RTM49C', 49, 'c', -500, 1.80, 1.82),
-    option('RTM49P', 49, 'p', -500, 0.10, 0.12),
-]
-t = autotrader.AutoTrader(StepClient(securities), live=True)
+# with spot far above the strike so its delta is enormous. The market quotes
+# 30% vol against the week's announced 20%, so the view is short vol at full
+# size - which is exactly what the book already holds. Nothing needs trading,
+# so execute() has no chunks, and before the backstop that meant the tick
+# hedged nothing at all.
+backstop_securities = straddle_book(0.30)
+t = autotrader.AutoTrader(StepClient(backstop_securities), live=True)
 t.step()
+options_sent = [s for s in t.client.sent if s[0] != config.UNDERLYING]
 hedges = [s for s in t.client.sent if s[0] == config.UNDERLYING]
+# Without this first check the test passes for the wrong reason: a zero gap
+# liquidates the straddle, and the hedge that liquidation drags along would
+# satisfy the assertion below even with the backstop deleted.
+check('the tick really had nothing to trade', options_sent == [],
+      f'sent {t.client.sent}')
 check('a tick that trades nothing still hedges', hedges != [],
       f'sent {t.client.sent}')
 check('and it hedges the right way (buys against a short-straddle delta)',
       bool(hedges) and hedges[0][1] == 'BUY', f'sent {hedges}')
+
+# Late in a heat the option quotes stop carrying a usable implied vol at all -
+# every leg deep in the money and quoted at pennies, so nothing solves. step()
+# has no view to trade on and returns early, but the delta of what is already
+# held is at its most violent right there, and the penalty does not pause.
+dark = [share_row(2708, 50.68),
+        option('RTM49C', -500, 0.01, 0.03),      # intrinsic 1.68: unsolvable
+        option('RTM52P', 0, 0.01, 0.03)]         # intrinsic 1.32: unsolvable
+dark_chain = vol_engine.build_chain(dark, BACKSTOP_TICK, 300, {4: 0.20},
+                                    mode='market')
+check('the fixture really has no market IV to work with',
+      dark_chain['market_avg_iv'] is None, f"got {dark_chain['market_avg_iv']}")
+t = autotrader.AutoTrader(StepClient(dark), live=True)
+t.step()
+check('a chain with no usable implied vol is still hedged',
+      [s for s in t.client.sent if s[0] == config.UNDERLYING] != [],
+      f'sent {t.client.sent}')
+
+# The other early exit: the quotes solve, but every leg is filtered out by the
+# vega / IV-spread test, so there is no strike to work at. Same obligation.
+untradeable = straddle_book(0.30, width=0.80)
+un_chain = vol_engine.build_chain(untradeable, BACKSTOP_TICK, 300, {4: 0.20},
+                                  mode='market')
+check('the fixture really has a market IV but nothing tradeable',
+      un_chain['market_avg_iv'] is not None
+      and not any(r['tradeable'] for r in un_chain['rows']),
+      f"avg {un_chain['market_avg_iv']}")
+t = autotrader.AutoTrader(StepClient(untradeable), live=True)
+t.step()
+check('a chain with no tradeable strike is still hedged',
+      [s for s in t.client.sent if s[0] == config.UNDERLYING] != [],
+      f'sent {t.client.sent}')
 
 print('\ninterleaved hedging')
 
@@ -610,49 +681,27 @@ check('call and put chunks are alternated, not run leg by leg',
            if tkr != config.UNDERLYING}) == 2,
       f'first sends {[s[0] for s in t.client.sent[:4]]}')
 
-# The hedge must be computed from the position we are ABOUT to hold, not the
-# one we held before this tick's option trades. Hedging the stale figure and
-# correcting a tick later produced BUY 12,369 RTM followed by SELL 12,381 one
-# second afterwards, and 215,495 shares of round-tripping across one heat.
-print('\nprojected delta (hedge lag fix)')
+# A rejected order moves no delta. The running figure execute() carries
+# between chunks is local arithmetic, not a reading from the API, so counting a
+# bounced order as filled hedges against exposure the book never acquired - and
+# the shares that hedge trades are real.
+print('\nrejected orders')
 
 
-def drow(ticker, strike, flag, delta, position=0):
-    return {'ticker': ticker, 'strike': float(strike), 'flag': flag,
-            'delta': delta, 'position': position, 'tradeable': True}
+class RejectingClient(FakeClient):
+    """Refuses option orders the way the net option limit does."""
+
+    def send_in_chunks(self, ticker, action, quantity, max_chunk):
+        if ticker != config.UNDERLYING:
+            raise autotrader.ApiException('...will exceed net trading limits')
+        return super().send_in_chunks(ticker, action, quantity, max_chunk)
 
 
-t = make_trader()
-# A lopsided book: 400 calls, no puts. Stale delta is enormous.
-lopsided = {
-    'underlying_position': 0,
-    'rows': [drow('RTM50C', 50, 'c', 0.50, 400), drow('RTM50P', 50, 'p', -0.50, 0)],
-}
-stale = vol_engine.portfolio_delta(lopsided['rows'], 0)
-check('stale delta on a half-built straddle is huge', close(stale, 20_000.0),
-      f'got {stale}')
-check('projected delta once both legs reach target is ~flat',
-      close(t.projected_delta(lopsided, 50.0, 400), 0.0),
-      f'got {t.projected_delta(lopsided, 50.0, 400)}')
-check('so the hedger no longer chases a transient',
-      abs(t.projected_delta(lopsided, 50.0, 400)) < abs(stale))
-
-# Positions at strikes we are closing must not count toward the hedge.
-leaving = {
-    'underlying_position': 1_000,
-    'rows': [drow('RTM48C', 48, 'c', 0.90, 500), drow('RTM48P', 48, 'p', -0.10, 500),
-             drow('RTM52C', 52, 'c', 0.05, 0), drow('RTM52P', 52, 'p', -0.95, 0)],
-}
-check('strikes being closed contribute nothing',
-      close(t.projected_delta(leaving, 52.0, 100),
-            1_000 + 100 * 0.05 * 100 + 100 * -0.95 * 100),
-      f'got {t.projected_delta(leaving, 52.0, 100)}')
-check('closing everything leaves only the share position',
-      close(t.projected_delta(leaving, 52.0, 0), 1_000.0))
-check('rows with no delta are skipped safely',
-      close(t.projected_delta(
-          {'underlying_position': 5,
-           'rows': [dict(drow('RTM50C', 50, 'c', 0.5, 10), delta=None)]}, 50.0, 10), 5.0))
+t = autotrader.AutoTrader(RejectingClient(), live=True)
+t.execute({'rows': rows, 'portfolio_delta': 0.0, 'underlying_position': 0.0,
+           'spot': 51.23}, 52.0, k52c, k52p, -500)
+check('an option order that bounces is not hedged against',
+      t.client.sent == [], f'sent {t.client.sent}')
 
 # Strike selection: at the money, and sticky so ordinary drift does not churn.
 rows = [leg(f'RTM{k}{s.upper()}', k, s) for k in (48, 49, 50, 51, 52)
