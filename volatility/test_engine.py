@@ -1,0 +1,301 @@
+"""
+Offline verification of the volatility maths. Runs with no RIT server.
+
+    python test_engine.py
+
+These check the parts that would fail silently and expensively in a live heat:
+ticker parsing, the integrated-variance blend, implied-vol round trips, the
+delta and hedging arithmetic, and the news regexes.
+"""
+
+import math
+
+from py_vollib.black_scholes import black_scholes
+
+import config
+import news_parser
+import vol_engine
+
+PASS, FAIL = 0, 0
+
+
+def check(name, condition, detail=''):
+    global PASS, FAIL
+    if condition:
+        PASS += 1
+        print(f'  PASS  {name}')
+    else:
+        FAIL += 1
+        print(f'  FAIL  {name}  {detail}')
+
+
+def close(a, b, tol=1e-6):
+    return a is not None and b is not None and abs(a - b) < tol
+
+
+# ---------------------------------------------------------------- tickers
+print('\nticker parsing')
+check('RTM48C -> call, 48', vol_engine.parse_option_ticker('RTM48C') == ('c', 48.0))
+check('RTM52P -> put, 52', vol_engine.parse_option_ticker('RTM52P') == ('p', 52.0))
+check('RTM50C -> call, 50', vol_engine.parse_option_ticker('RTM50C') == ('c', 50.0))
+check('RTM (underlying) -> None', vol_engine.parse_option_ticker('RTM') is None)
+check('alternate RTM1C48 still parses',
+      vol_engine.parse_option_ticker('RTM1C48') == ('c', 48.0))
+check('lowercase handled', vol_engine.parse_option_ticker('rtm49p') == ('p', 49.0))
+
+# all ten spec tickers
+spec = [f'RTM{k}{cp}' for k in (48, 49, 50, 51, 52) for cp in ('C', 'P')]
+check('all 10 spec tickers parse',
+      all(vol_engine.parse_option_ticker(t) for t in spec))
+
+# ------------------------------------------------------------ time to expiry
+print('\ntime to expiry')
+check('tick 0 of 300 = 1/12 year',
+      close(vol_engine.time_to_expiry(0, 300), 1 / 12))
+check('matches base script divisor (300-t)/3600 at t=150',
+      close(vol_engine.time_to_expiry(150, 300), (300 - 150) / 3600))
+check('expiry is zero', close(vol_engine.time_to_expiry(300, 300), 0.0))
+check('600-tick case also gives 1/12 at t=0',
+      close(vol_engine.time_to_expiry(0, 600), 1 / 12))
+
+# -------------------------------------------------------------- week mapping
+# Checked against every row of the sample news schedule in the case PDF, which
+# describes a 600-tick case: t=1 -> W1, t=75 -> W1, t=150 -> W2, t=450 -> W4.
+print('\nweek mapping')
+check('PDF table: t=1 is week 1', news_parser.week_of_tick(1, 600) == 1)
+check('PDF table: t=75 is week 1', news_parser.week_of_tick(75, 600) == 1)
+check('PDF table: t=150 is week 2', news_parser.week_of_tick(150, 600) == 2)
+check('PDF table: t=450 is week 4', news_parser.week_of_tick(450, 600) == 4)
+check('300-tick: t=1 is week 1', news_parser.week_of_tick(1, 300) == 1)
+check('300-tick: t=74 is week 1', news_parser.week_of_tick(74, 300) == 1)
+check('300-tick: t=75 starts week 2', news_parser.week_of_tick(75, 300) == 2)
+check('300-tick: t=299 is week 4', news_parser.week_of_tick(299, 300) == 4)
+check('week never exceeds 4', news_parser.week_of_tick(300, 300) == 4)
+
+# ------------------------------------------------------- variance blending
+print('\nintegrated-variance blend')
+weights = vol_engine.remaining_week_weights(0, 300)
+check('4 whole weeks remain at t=0', len(weights) == 4 and close(weights[1], 75.0))
+weights = vol_engine.remaining_week_weights(40, 300)
+check('mid week 1: partial week remains', close(weights[1], 35.0))
+check('mid week 1: later weeks whole', close(weights[4], 75.0))
+
+# Worked example: week 1 at 20%, weeks 2-4 at 28%.
+#   sqrt((75*0.20^2 + 225*0.28^2) / 300) = sqrt(0.0688) = 0.262298...
+sigma, detail = vol_engine.blended_sigma(
+    0, 300, {1: 0.20, 2: 0.28, 3: 0.28, 4: 0.28})
+expected = math.sqrt((75 * 0.20 ** 2 + 225 * 0.28 ** 2) / 300)
+check('blend matches hand calculation', close(sigma, expected),
+      f'got {sigma}, want {expected}')
+check('blend is well above the current week alone', sigma > 0.26)
+check('naive current-week number would be 0.20 (the error we avoid)',
+      close(0.20, 0.20) and sigma - 0.20 > 0.06)
+
+# Late in the case the current week must dominate.
+sigma_late, _ = vol_engine.blended_sigma(
+    290, 300, {1: 0.20, 2: 0.28, 3: 0.28, 4: 0.35})
+check('at t=290 blend collapses to week 4 sigma', close(sigma_late, 0.35, 1e-9))
+
+# Constant vol must blend to itself.
+flat, _ = vol_engine.blended_sigma(0, 300, {1: 0.25, 2: 0.25, 3: 0.25, 4: 0.25})
+check('constant vol blends to itself', close(flat, 0.25))
+
+# Tail-mode behaviour.
+m, _ = vol_engine.blended_sigma(0, 300, {1: 0.20}, market_iv=0.30, mode='market')
+check('market mode uses market IV for unknown weeks',
+      close(m, math.sqrt((75 * 0.04 + 225 * 0.09) / 300)))
+f, _ = vol_engine.blended_sigma(0, 300, {1: 0.20}, mode='fixed', fixed=0.25)
+check('fixed mode uses the configured prior',
+      close(f, math.sqrt((75 * 0.04 + 225 * 0.0625) / 300)))
+p, _ = vol_engine.blended_sigma(0, 300, {1: 0.20}, mode='persist')
+check('persist mode carries last known sigma forward', close(p, 0.20))
+check('no data anywhere still returns a number',
+      vol_engine.blended_sigma(0, 300, {}, mode='fixed', fixed=0.25)[0] is not None)
+
+# ------------------------------------------------------------- implied vol
+print('\nimplied vol round trip')
+S, K, T, sig = 50.0, 50.0, 1 / 12, 0.25
+for flag in ('c', 'p'):
+    price = black_scholes(flag, S, K, T, 0.0, sig)
+    solved = vol_engine.solve_implied_vol(price, S, K, T, flag)
+    check(f'{flag}: round trips to 25%', close(solved, sig, 1e-4),
+          f'got {solved}')
+
+deep = black_scholes('c', 50.0, 52.0, 1 / 12, 0.0, 0.25)
+check('OTM call round trips',
+      close(vol_engine.solve_implied_vol(deep, 50.0, 52.0, 1 / 12, 'c'), 0.25, 1e-4))
+check('zero time to expiry returns None',
+      vol_engine.solve_implied_vol(1.0, 50.0, 50.0, 0.0, 'c') is None)
+check('below-intrinsic price returns None (not a fake low vol)',
+      vol_engine.solve_implied_vol(0.01, 50.0, 40.0, 1 / 12, 'c') is None)
+check('zero price returns None',
+      vol_engine.solve_implied_vol(0.0, 50.0, 50.0, 1 / 12, 'c') is None)
+
+# ------------------------------------------------------------ portfolio delta
+print('\nportfolio delta')
+rows = [{'position': 10, 'delta': 0.5}, {'position': -5, 'delta': -0.4}]
+# 10 * 0.5 * 100 = 500;  -5 * -0.4 * 100 = 200;  plus 1000 shares.
+check('options scale by the 100x contract multiplier',
+      close(vol_engine.portfolio_delta(rows, 1000), 1000 + 500 + 200))
+check('flat book is flat delta', close(vol_engine.portfolio_delta([], 0), 0.0))
+check('rows with no delta are skipped',
+      close(vol_engine.portfolio_delta([{'position': 9, 'delta': None}], 50), 50))
+
+# ----------------------------------------------------------------- hedging
+print('\nhedging')
+h = vol_engine.hedge_suggestion(1000)
+check('inside the band suggests nothing', h['action'] is None)
+check('inside the band accrues no penalty', close(h['penalty_per_second'], 0.0))
+
+h = vol_engine.hedge_suggestion(6000)
+check('past the trigger suggests a SELL', h['action'] == 'SELL')
+check('sells back to the target buffer', h['quantity'] == 4000)
+check('not yet over the limit', not h['over_limit'])
+
+h = vol_engine.hedge_suggestion(-6000)
+check('negative delta suggests a BUY', h['action'] == 'BUY')
+check('symmetric size', h['quantity'] == 4000)
+
+h = vol_engine.hedge_suggestion(9000)
+check('over the limit is flagged', h['over_limit'] and h['urgent'])
+# (9000 - 7000) * 0.10 = $200/second
+check('penalty matches the spec formula', close(h['penalty_per_second'], 200.0),
+      f"got {h['penalty_per_second']}")
+check('flatten quantity is the full delta', h['flatten_quantity'] == 9000)
+
+# --------------------------------------------------------------- news parsing
+print('\nnews parsing')
+items = [
+    {'tick': 1, 'headline': 'Analyst Update',
+     'body': 'The realized volatility of RTM for this week will be 20%'},
+    {'tick': 37, 'headline': 'Analyst Update',
+     'body': 'The realized volatility of RTM for next week will be between 27-30%'},
+]
+vols, obs = news_parser.parse_vol_news(items, 300)
+check('exact point value parsed', close(vols.get(1), 0.20))
+check('range midpoint parsed', close(vols.get(2), 0.285))
+check('point flagged exact', obs[0]['exact'] is True)
+check('range flagged as range', obs[1]['kind'] == 'range')
+
+variants = [
+    ({'tick': 1, 'headline': '', 'body': 'realized volatility for this week will be 22.5%'}, 0.225),
+    ({'tick': 1, 'headline': '', 'body': 'Volatility this week will be 18 %'}, 0.18),
+    ({'tick': 1, 'headline': '', 'body': 'volatility of RTM for this week will be between 20% and 24%'}, 0.22),
+    ({'tick': 1, 'headline': '', 'body': 'volatility this week will be 15 to 25%'}, 0.20),
+]
+for item, want in variants:
+    got, _ = news_parser.parse_vol_news([item], 300)
+    check(f'variant: {item["body"][:44]}...', close(got.get(1), want),
+          f'got {got}')
+
+# An exact "this week" must beat an earlier range for the same week.
+items = [
+    {'tick': 37, 'body': 'volatility of RTM for next week will be between 27-30%'},
+    {'tick': 76, 'body': 'The realized volatility of RTM for this week will be 29%'},
+]
+vols, _ = news_parser.parse_vol_news(items, 300)
+check('exact value supersedes the earlier range', close(vols.get(2), 0.29))
+
+check('non-volatility news ignored',
+      news_parser.parse_vol_news(
+          [{'tick': 1, 'body': 'Welcome to the case.'}], 300)[0] == {})
+check('delta limit read from news',
+      news_parser.parse_delta_limit(
+          [{'headline': '', 'body': 'The delta limit for this heat is 5,000'}]) == 5000)
+check('no delta limit mentioned returns None',
+      news_parser.parse_delta_limit([{'headline': '', 'body': 'hello'}]) is None)
+
+# Week assignment must come from counting releases, not from tick arithmetic,
+# so that the PDF's contradictory tick conventions cannot misfile a week.
+full_schedule = [
+    {'tick': 1, 'body': 'The realized volatility of RTM for this week will be 20%'},
+    {'tick': 37, 'body': 'volatility of RTM for next week will be between 27-30%'},
+    {'tick': 76, 'body': 'The realized volatility of RTM for this week will be 29%'},
+    {'tick': 112, 'body': 'volatility of RTM for next week will be between 18-22%'},
+    {'tick': 151, 'body': 'The realized volatility of RTM for this week will be 19%'},
+    {'tick': 187, 'body': 'volatility of RTM for next week will be between 24-28%'},
+    {'tick': 226, 'body': 'The realized volatility of RTM for this week will be 26%'},
+]
+for total in (300, 600):
+    vols, _ = news_parser.parse_vol_news(full_schedule, total)
+    check(f'{total}-tick: week 1 = 20%', close(vols.get(1), 0.20), f'got {vols}')
+    check(f'{total}-tick: week 2 = 29% (exact beats 28.5% range)',
+          close(vols.get(2), 0.29), f'got {vols}')
+    check(f'{total}-tick: week 3 = 19%', close(vols.get(3), 0.19), f'got {vols}')
+    check(f'{total}-tick: week 4 = 26%', close(vols.get(4), 0.26), f'got {vols}')
+
+# Mid-case, before week 4's exact value lands, week 4 must still hold the range.
+partial, _ = news_parser.parse_vol_news(full_schedule[:6], 300)
+check('week 4 holds the range midpoint until its exact value arrives',
+      close(partial.get(4), 0.26))
+check('a lone "next week" release with no prior week lands on week 2',
+      close(news_parser.parse_vol_news(
+          [{'tick': 5, 'body': 'volatility for next week will be between 20-30%'}],
+          300)[0].get(2), 0.25))
+
+# ------------------------------------------------------------ chain assembly
+print('\nchain assembly (synthetic market)')
+# Market maker prices every strike at 22% while the true blend is higher, so
+# every option should read as cheap.
+spot = 50.0
+securities = [{'ticker': 'RTM', 'bid': 49.99, 'ask': 50.01, 'last': 50.0, 'position': 0}]
+for strike in (48, 49, 50, 51, 52):
+    for flag, suffix in (('c', 'C'), ('p', 'P')):
+        mid = black_scholes(flag, spot, strike, 1 / 12, 0.0, 0.22)
+        securities.append({
+            'ticker': f'RTM{strike}{suffix}',
+            'bid': round(mid - 0.01, 2), 'ask': round(mid + 0.01, 2),
+            'last': round(mid, 2), 'position': 0,
+        })
+
+chain = vol_engine.build_chain(securities, 0, 300,
+                               {1: 0.28, 2: 0.28, 3: 0.28, 4: 0.28},
+                               mode='fixed')
+check('all ten options in the chain', len(chain['rows']) == 10)
+check('market IV recovered as 22%', close(chain['market_avg_iv'], 0.22, 1e-3),
+      f"got {chain['market_avg_iv']}")
+check('forecast is the announced 28%', close(chain['forecast'], 0.28, 1e-9))
+check('every strike shows the same market IV (no smile)',
+      max(r['market_iv'] for r in chain['rows'])
+      - min(r['market_iv'] for r in chain['rows']) < 1e-3)
+check('forecast above market IV means positive iv_gap',
+      all(r['iv_gap'] > 0 for r in chain['rows']))
+check('underpriced options show positive buy edge',
+      all(r['buy_edge'] > 0 for r in chain['rows']))
+check('and negative sell edge (selling them would lose)',
+      all(r['sell_edge'] < 0 for r in chain['rows']))
+check('flat book has zero portfolio delta', close(chain['portfolio_delta'], 0.0))
+check('call deltas positive, put deltas negative',
+      all(r['delta'] > 0 for r in chain['rows'] if r['flag'] == 'c')
+      and all(r['delta'] < 0 for r in chain['rows'] if r['flag'] == 'p'))
+
+# In equilibrium (forecast == market IV) no edge should survive fees.
+chain = vol_engine.build_chain(securities, 0, 300,
+                               {1: 0.22, 2: 0.22, 3: 0.22, 4: 0.22},
+                               mode='fixed')
+check('at fair value no trade clears the fee hurdle',
+      all(r['buy_edge'] < 0 and r['sell_edge'] < 0 for r in chain['rows']))
+
+# Dispersion: make one strike visibly rich.
+rich = dict(securities[1])
+rich['bid'] += 0.30
+rich['ask'] += 0.30
+chain = vol_engine.build_chain([securities[0], rich] + securities[2:], 0, 300,
+                               {1: 0.22, 2: 0.22, 3: 0.22, 4: 0.22}, mode='fixed')
+target = next(r for r in chain['rows'] if r['ticker'] == rich['ticker'])
+check('the rich strike shows positive dispersion', target['dispersion'] > 0)
+check('it is the most dispersed strike',
+      target['dispersion'] == max(r['dispersion'] for r in chain['rows']))
+check('and it is the one worth selling',
+      target['sell_edge'] == max(r['sell_edge'] for r in chain['rows']))
+
+# Missing underlying must fail loudly, not silently price off zero.
+try:
+    vol_engine.build_chain([{'ticker': 'RTM48C', 'bid': 1, 'ask': 1.02,
+                             'last': 1.01, 'position': 0}], 0, 300, {1: 0.2})
+    check('missing underlying raises', False, 'no exception raised')
+except ValueError:
+    check('missing underlying raises', True)
+
+print(f'\n{PASS} passed, {FAIL} failed\n')
+raise SystemExit(1 if FAIL else 0)

@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+
+# Recorded practice heats: large, machine-generated, and specific to one run.
+# Keep them locally for replay.py; there is no value in versioning them.
+volatility/heats/

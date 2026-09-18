@@ -1,0 +1,30 @@
+For the Volatility Trading Case
+
+Trader ID: jobe-2
+
+Password: exercise
+
+For the Algorithmic ETF Arbitrage Case
+
+Trader ID: jobe
+
+Password: exercise
+
+
+
+Practice Server Details
+
+Practice Servers will be enabled from September 11, 2026 by 12PM until the day of the competition.
+
+Volatility Trading Case practice server details
+
+Server host name: flserver.rotman.utoronto.ca
+Server port:
+16590 (Windows RIT)
+16595 (Browser, Mac App)
+Algorithmic EFT Arbitrage Trading Case practice server details
+
+Server host name: flserver.rotman.utoronto.ca
+Server port:
+16630 (Windows RIT)
+16635 (Browser, Mac App)
