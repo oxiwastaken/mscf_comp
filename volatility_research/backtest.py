@@ -237,6 +237,31 @@ def run(snapshots, policy, verbose=False, forecast_news=None,
                 book.trade_option(leg, change)
             pending_resize = False
 
+        # ------------------------------------------- transient delta penalty
+        # The hedge below lands in the same tick, which is why this backtest
+        # used to charge zero delta penalty on every heat while a live run paid
+        # $86,156. It is not free: the penalty accrues per SECOND, and a resize
+        # sends its option legs in 100-lot chunks before the RTM hedge can go
+        # out, so the book carries the un-hedged delta for roughly one second.
+        #
+        # Observed live at tick 225 - selling 500 RTM52C and 500 RTM52P with
+        # spot at 51.23 put the book at +47,713 delta for one second, because
+        # the ITM put carries ~0.7 delta and the straddle is only neutral at the
+        # money. That single resize cost $4,071.
+        #
+        # Charging one second of the pre-hedge breach is the honest minimum. It
+        # matters for sizing decisions specifically: a steeper ramp makes every
+        # resize larger, so the transient scales with it.
+        pre = [dict(r, position=book.positions.get(r['ticker'], 0))
+               for r in chain['rows']]
+        pre_delta = vol_engine.portfolio_delta(
+            pre, book.positions.get(config.UNDERLYING, 0))
+        transient = max(abs(pre_delta) - config.DELTA_LIMIT, 0.0)
+        if transient:
+            charge = transient * config.DELTA_PENALTY_RATE
+            book.cash -= charge
+            book.penalty += charge
+
         # ----------------------------------------------------------- hedge
         rows = [dict(r, position=book.positions.get(r['ticker'], 0))
                 for r in chain['rows']]
