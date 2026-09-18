@@ -345,6 +345,7 @@ except ValueError:
 # ------------------------------------------------------------- autotrader
 print('\nautotrader sizing and rebalancing')
 import autotrader                                            # noqa: E402
+import structure as structure_module                          # noqa: E402
 
 
 class FakeClient:
@@ -409,13 +410,19 @@ def leg(ticker, strike, flag, position=0, tradeable=True, delta=0.0):
             'position': position, 'tradeable': tradeable, 'delta': delta}
 
 
-def orders_for(call, put, target, rows=None, strike=50.0):
+def straddle(call, put, target):
+    """The desired book for a plain straddle - no wing structure."""
+    return {call['ticker']: target, put['ticker']: target}
+
+
+def orders_for(call, put, target, rows=None, strike=50.0, desired=None):
     """The option orders one tick would send, as [(ticker, signed change)]."""
     chain = {'rows': rows if rows is not None else [call, put]}
+    if desired is None:
+        desired = {call['ticker']: target, put['ticker']: target}
     trader = make_trader()
     return [(row['ticker'], change)
-            for row, change in trader.option_orders(chain, strike, call, put,
-                                                    target)]
+            for row, change in trader.option_orders(chain, desired)]
 
 
 call, put = leg('RTM50C', 50, 'c', 300), leg('RTM50P', 50, 'p', 300)
@@ -438,14 +445,32 @@ check('short straddle sells both legs',
       orders_for(leg('RTM50C', 50, 'c', 0), leg('RTM50P', 50, 'p', 0), -200)
       == [('RTM50C', -200), ('RTM50P', -200)])
 
-# Strikes being left are closed FIRST - the net option limit is enforced on
-# submission, so the old straddle must be off the book before the new one goes on.
+# Anything not named in the desired book is closed: that is how a strike we are
+# leaving, or a wing the structure has stood down from, comes off the board.
 stale = leg('RTM52C', 52, 'c', 200)
-check('strikes being left are closed before the new one is opened',
-      orders_for(leg('RTM50C', 50, 'c', 0), leg('RTM50P', 50, 'p', 0), 100,
-                 rows=[stale, leg('RTM50C', 50, 'c', 0),
-                       leg('RTM50P', 50, 'p', 0)])
-      == [('RTM52C', -200), ('RTM50C', 100), ('RTM50P', 100)])
+check('a position the desired book does not name is closed',
+      sorted(orders_for(leg('RTM50C', 50, 'c', 0), leg('RTM50P', 50, 'p', 0), 100,
+                        rows=[stale, leg('RTM50C', 50, 'c', 0),
+                              leg('RTM50P', 50, 'p', 0)]))
+      == [('RTM50C', 100), ('RTM50P', 100), ('RTM52C', -200)])
+
+# The deadband is a fee optimisation and it is not allowed to produce a book
+# the server would reject. Skipping the 94-lot trim below while taking the wing
+# close leaves 1,186 net against a 1,000 limit - the live failure this guards.
+breaching = orders_for(None, None, None,
+                       rows=[leg('RTM52C', 52, 'c', -187, delta=0.10),
+                             leg('RTM49C', 49, 'c', 593, delta=0.80),
+                             leg('RTM49P', 49, 'p', 593, delta=-0.20)],
+                       desired={'RTM49C': 499, 'RTM49P': 499})
+after = {'RTM52C': -187, 'RTM49C': 593, 'RTM49P': 593}
+for ticker, change in breaching:
+    after[ticker] += change
+check('the deadband may not leave the book over the net limit',
+      abs(sum(after.values())) <= config.LIMIT_OPT_NET,
+      f'net {abs(sum(after.values()))} after {breaching}')
+check('and it gets there by trading the whole desired book',
+      sorted(breaching) == [('RTM49C', -94), ('RTM49P', -94), ('RTM52C', 187)],
+      f'got {sorted(breaching)}')
 
 # ------------------------------------------------ interleaved hedging
 # The property that matters is not the final delta but the delta DURING the
@@ -616,7 +641,7 @@ chain = {'rows': rows, 'portfolio_delta': 0.0, 'underlying_position': 0.0,
          'spot': 51.23}
 
 t = make_trader()
-t.execute(chain, 52.0, k52c, k52p, -500)
+t.execute(chain, straddle(k52c, k52p, -500))
 peak = peak_delta_during(t, rows)
 check('delta stays inside the band THROUGHOUT a full-size resize',
       peak <= config.DELTA_LIMIT, f'peaked at {peak:,.0f}')
@@ -636,7 +661,7 @@ check('the un-interleaved equivalent would have breached',
 t = make_trader()
 t.execute({'rows': rows, 'portfolio_delta': 0.0,
            'underlying_position': config.LIMIT_RTM_GROSS, 'spot': 51.23},
-          52.0, k52c, k52p, -500)
+          straddle(k52c, k52p, -500))
 check('a hedge that would breach the RTM limit is capped, not abandoned',
       all(q <= config.MAX_TRADE_RTM for tkr, _a, q in t.client.sent
           if tkr == config.UNDERLYING))
@@ -647,7 +672,8 @@ check('a hedge that would breach the RTM limit is capped, not abandoned',
 # delta already just under the trigger reproduces it exactly.
 t = make_trader()
 t.execute({'rows': rows, 'portfolio_delta': 4_900.0,
-           'underlying_position': 0.0, 'spot': 51.23}, 52.0, k52c, k52p, -500)
+           'underlying_position': 0.0, 'spot': 51.23},
+          straddle(k52c, k52p, -500))
 seen, worst = 4_900.0, 4_900.0
 for ticker, action, quantity in t.client.sent:
     signed = quantity if action == 'BUY' else -quantity
@@ -670,7 +696,7 @@ atm_p = leg('RTM50P', 50, 'p', 0, delta=-0.48)
 atm_rows = [atm_c, atm_p]
 t = make_trader()
 t.execute({'rows': atm_rows, 'portfolio_delta': 0.0, 'underlying_position': 0.0,
-           'spot': 50.0}, 50.0, atm_c, atm_p, 500)
+           'spot': 50.0}, straddle(atm_c, atm_p, 500))
 hedge_shares = sum(q for tkr, _a, q in t.client.sent if tkr == config.UNDERLYING)
 check('opening a balanced straddle barely hedges at all',
       hedge_shares <= 5_000, f'hedged {hedge_shares:,} shares')
@@ -699,7 +725,7 @@ class RejectingClient(FakeClient):
 
 t = autotrader.AutoTrader(RejectingClient(), live=True)
 t.execute({'rows': rows, 'portfolio_delta': 0.0, 'underlying_position': 0.0,
-           'spot': 51.23}, 52.0, k52c, k52p, -500)
+           'spot': 51.23}, straddle(k52c, k52p, -500))
 check('an option order that bounces is not hedged against',
       t.client.sent == [], f'sent {t.client.sent}')
 
@@ -729,6 +755,125 @@ check('skips strikes whose IV the quote cannot pin', strike == 49.0,
 strike, _ = make_trader().pick_strike(
     {'spot': 50.0, 'rows': [leg('RTM50C', 50, 'c', tradeable=False)]})
 check('no usable strike returns None', strike is None, f'got {strike}')
+
+# ---------------------------------------------------------- gross capacity
+# The case sets two option limits - 1,000 net and 2,500 gross - and a straddle
+# spends 1,000 of each. Shorting the cheapest vega on the board buys net room
+# for more of the dearest, which is the only way to carry more vega than the
+# net limit alone allows. See structure.py.
+print('\ngross capacity (the wing structure)')
+import structure                                             # noqa: E402
+
+
+def vrow(ticker, strike, flag, position=0, delta=0.0, vega=0.05):
+    return {'ticker': ticker, 'strike': float(strike), 'flag': flag,
+            'position': position, 'tradeable': True, 'delta': delta,
+            'vega': vega, 'bid': 0.40, 'ask': 0.42}
+
+
+# Vega falls away from the money, which is the whole basis of the trade: the
+# 48 and 52 wings are worth a fifth of the 50-strike straddle per contract.
+wing_rows = [
+    vrow('RTM48C', 48, 'c', delta=0.92, vega=0.010),
+    vrow('RTM48P', 48, 'p', delta=-0.08, vega=0.010),
+    vrow('RTM49C', 49, 'c', delta=0.73, vega=0.032),
+    vrow('RTM49P', 49, 'p', delta=-0.27, vega=0.032),
+    vrow('RTM50C', 50, 'c', delta=0.52, vega=0.050),
+    vrow('RTM50P', 50, 'p', delta=-0.48, vega=0.050),
+    vrow('RTM51C', 51, 'c', delta=0.27, vega=0.032),
+    vrow('RTM51P', 51, 'p', delta=-0.73, vega=0.032),
+    vrow('RTM52C', 52, 'c', delta=0.08, vega=0.010),
+    vrow('RTM52P', 52, 'p', delta=-0.92, vega=0.010),
+]
+wing_chain = {'rows': wing_rows, 'spot': 50.0, 'portfolio_delta': 0.0,
+              'underlying_position': 0}
+
+book = structure.desired_book(wing_chain, 50.0, 500)
+gross, net = structure.limits_used(book)
+check('the structure spends the whole gross limit', gross == 2_500,
+      f'gross {gross}: {book}')
+check('and exactly the net limit, not a contract more', net == 1_000,
+      f'net {net}: {book}')
+check('the extra size goes to the money, where vega is highest',
+      book['RTM50C'] == 875 and book['RTM50P'] == 875, f'got {book}')
+check('the shorts go to the cheapest vega on the board',
+      book.get('RTM48P') == -375 and book.get('RTM52C') == -375,
+      f'got {book}')
+check('a short-vol view mirrors the whole structure',
+      structure.desired_book(wing_chain, 50.0, -500)
+      == {k: -v for k, v in book.items()},
+      f'got {structure.desired_book(wing_chain, 50.0, -500)}')
+check('below full conviction the structure stays off',
+      structure.desired_book(wing_chain, 50.0, 300)
+      == {'RTM50C': 300, 'RTM50P': 300},
+      f'got {structure.desired_book(wing_chain, 50.0, 300)}')
+
+# The gate is in dollars of extra vega per vol point, not in the vega RATIO:
+# what matters is what the structure buys against its fixed cost in fees.
+flat_vega = [dict(row, vega=0.048) for row in wing_rows]
+check('wings whose vega nearly matches the money are not worth shorting',
+      structure.desired_book(dict(wing_chain, rows=flat_vega), 50.0, 500)
+      == {'RTM50C': 500, 'RTM50P': 500},
+      f"got {structure.desired_book(dict(wing_chain, rows=flat_vega), 50.0, 500)}")
+check('the same board with cheap wings does put them on',
+      len(structure.desired_book(wing_chain, 50.0, 500)) == 4)
+
+# Stickiness: the cheapest leg changes as RTM drifts, and re-picking it every
+# tick round trips 750 contracts to move a short to a wing barely cheaper.
+drifted = dict(wing_chain, spot=50.4)
+held = {'RTM50C': 875, 'RTM50P': 875, 'RTM48P': -375, 'RTM52C': -375}
+check('a wing already on the board is kept, not re-picked',
+      structure.desired_book(drifted, 50.0, 500, held=held) == held,
+      f'got {structure.desired_book(drifted, 50.0, 500, held=held)}')
+
+# The hedge has to be able to follow the structure. Late in a heat the money's
+# legs stop cancelling - a 0.95 call against a 0.05 put - so the extra size the
+# structure carries is no longer near delta-neutral, and with the share book
+# already full there is nowhere to hedge it. The straddle is the view and is
+# never sacrificed to this; the structure is a claim on a limit, and the claim
+# is what gives way.
+expiring = [dict(row) for row in wing_rows]
+for row in expiring:
+    if row['strike'] == 50:
+        row['delta'] = 0.95 if row['flag'] == 'c' else -0.05
+expiring_chain = dict(wing_chain, rows=expiring)
+check('with shares to spare the structure still goes on',
+      len(structure.desired_book(expiring_chain, 50.0, 500, underlying=0)) == 4,
+      f'got {structure.desired_book(expiring_chain, 50.0, 500, underlying=0)}')
+check('with the share book full it stands down to the plain straddle',
+      structure.desired_book(expiring_chain, 50.0, 500,
+                             underlying=config.LIMIT_RTM_GROSS)
+      == {'RTM50C': 500, 'RTM50P': 500},
+      f'got {structure.desired_book(expiring_chain, 50.0, 500, underlying=config.LIMIT_RTM_GROSS)}')
+
+# THE LIVE-SAFETY PROPERTY. Both limits are enforced on submission, so every
+# intermediate state has to be legal too - not just the destination. Flipping
+# from a long structure to a short one is the hard case: sell the at-the-money
+# legs first and the book is 2,500 net short while the wings are still short;
+# buy the wings back first and the gross limit blows instead.
+positions = {'RTM50C': 875, 'RTM50P': 875, 'RTM48P': -375, 'RTM52C': -375}
+flip_rows = [dict(row, position=positions.get(row['ticker'], 0))
+             for row in wing_rows]
+flip_chain = dict(wing_chain, rows=flip_rows)
+target_book = structure.desired_book(flip_chain, 50.0, -500)
+t = make_trader()
+running = dict(positions)
+worst_gross = worst_net = 0
+for row, lot in t.chunks(flip_chain, target_book, 0.0):
+    running[row['ticker']] = running.get(row['ticker'], 0) + lot
+    gross, net = structure.limits_used(running)
+    worst_gross, worst_net = max(worst_gross, gross), max(worst_net, net)
+check('no single order in a full flip breaches the gross limit',
+      worst_gross <= config.LIMIT_OPT_GROSS, f'peaked at {worst_gross}')
+check('nor the net limit, which is the one that rejects orders',
+      worst_net <= config.LIMIT_OPT_NET, f'peaked at {worst_net}')
+check('and the flip actually lands on the book it was aiming for',
+      {k: v for k, v in running.items() if v} ==
+      {k: v for k, v in target_book.items() if v},
+      f'ended {running}')
+check('every order respects the 100-contract maximum trade size',
+      all(abs(lot) <= config.MAX_TRADE_OPTIONS
+          for _row, lot in t.chunks(flip_chain, target_book, 0.0)))
 
 # ------------------------------------------------------ news-gated resizing
 print('\nnews-gated rebalancing')

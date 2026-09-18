@@ -44,6 +44,7 @@ import time
 
 import config
 import news_parser
+import structure
 import vol_engine
 from rit_api import ApiException, RitClient
 
@@ -267,11 +268,25 @@ class AutoTrader:
         from the strike the legs stop cancelling. This bounds the position so
         that even a fully one-sided outcome stays hedgeable, which is precisely
         the guard the RTM52P episode showed to be missing.
+
+        The wing structure raises the at-the-money position by W/2 a leg while
+        the share limit stays at 50,000, so the same straddle target now asks
+        more of the hedge. Discounting the cap by that inflation keeps the
+        guard honest: measured over 124 recordings, the structure already more
+        than doubles the delta penalty ($8,786 to $19,911 a heat), and running
+        out of shares to hedge with is how that becomes unbounded.
         """
         headroom = config.LIMIT_RTM_GROSS - abs(chain['underlying_position'])
         headroom = max(headroom, 0) + self.delta_limit
         # Worst case a straddle leg pair nets ~1.0 delta per contract pair.
         return max(int(headroom / config.CONTRACT_MULTIPLIER), 0)
+
+    @staticmethod
+    def structure_inflation():
+        """How much bigger the option book is than the straddle alone."""
+        if not structure.WING_CONTRACTS or not config.LIMIT_OPT_NET:
+            return 1.0
+        return 1.0 + structure.WING_CONTRACTS / config.LIMIT_OPT_NET
 
     def pick_strike(self, chain):
         """
@@ -360,7 +375,13 @@ class AutoTrader:
             self._pending_resize = True
 
         call, put = by_strike[strike]['c'], by_strike[strike]['p']
-        held = (call['position'] + put['position']) / 2.0
+        # Conviction is measured in NET contracts, not in the size of the
+        # at-the-money leg. The wing structure inflates that leg with net room
+        # borrowed from its own shorts, so a ratchet reading the leg would
+        # treat the structure as conviction and ratchet on top of it - which
+        # breaches both limits within two ticks. With the structure switched
+        # off this is exactly the leg count.
+        held = self.net_contracts(chain) / 2.0
 
         # Wind down rather than build up once the gap has decayed or we are
         # close enough to expiry that hedging a straddle turns hostile.
@@ -371,12 +392,23 @@ class AutoTrader:
             target = ratchet_target(self.target_legs(gap, chain, net_limit),
                                     int(round(held)))
 
+        # What the two limits together allow us to hold for this view: the
+        # straddle, plus the wing shorts that buy net room for more of it.
+        desired = structure.desired_book(
+            chain, strike, target,
+            held={row['ticker']: row['position'] for row in chain['rows']},
+            net_limit=net_limit, gross_limit=_gross_limit,
+            underlying=float(chain['underlying_position']))
+
         if self.verbose or target != round(held):
+            wings = sum(abs(q) for t, q in desired.items()
+                        if t not in (call['ticker'], put['ticker']))
             self.log(f'tick {tick:>3}/{total}  spot {chain["spot"]:.2f}  '
                      f'fcst {chain["forecast"] * 100:5.2f}%  '
                      f'mkt {chain["market_avg_iv"] * 100:5.2f}%  '
                      f'gap {gap * 100:+5.2f}% (raw {raw_gap * 100:+5.2f}%)  '
                      f'K{strike:.0f}  held {held:+.0f}  target {target:+d}'
+                     + (f'  wings {wings}' if wings else '')
                      + ('  [late]' if late else ''))
 
         # Only resize on new information. Exits are always allowed: once the
@@ -387,7 +419,7 @@ class AutoTrader:
         if may_trade:
             # execute() hedges as it goes and returns the state it left behind,
             # anchored on this tick's true portfolio delta.
-            delta, underlying = self.execute(chain, strike, call, put, target)
+            delta, underlying = self.execute(chain, desired)
             self._pending_resize = False
         else:
             # Not trading, so the book is exactly what the API just reported.
@@ -415,35 +447,54 @@ class AutoTrader:
         self.hedge_running(delta, underlying)
         return True
 
-    def option_orders(self, chain, strike, call, put, target):
-        """
-        This tick's option orders as [(row, signed change)], closes first.
+    def net_contracts(self, chain):
+        """Signed sum of every option position - what the net limit counts."""
+        return sum(int(row['position']) for row in chain['rows'])
 
-        Order matters. The strikes we are leaving go FIRST: the net option limit
-        is enforced on submission, so holding the old straddle while opening the
-        new one gets the new one rejected outright. Seen live at tick 236 - a
-        303-lot of K52 bounced off the limit because 404 lots of K50 were still
-        on the book, and only filled a tick later once K50 had been closed.
+    def option_orders(self, chain, desired):
         """
-        orders = []
-        for row in chain['rows']:
-            if row['strike'] != strike and row['position']:
-                orders.append((row, -int(row['position'])))
-        for leg in (call, put):
-            change = int(target - leg['position'])
-            if change == 0:
-                continue
-            # The deadband is skipped when target is zero: closing out is always
-            # worth doing in full, however small the remainder.
-            threshold = max(REBALANCE_MIN,
-                            REBALANCE_FRACTION * max(abs(target),
-                                                     abs(leg['position'])))
-            if target != 0 and abs(change) < threshold:
-                continue
-            orders.append((leg, change))
+        This tick's option orders as [(row, signed change)].
+
+        The deadband skips a resize too small to be worth its fees, and that is
+        all it is for. It is NOT allowed to produce a book the limits forbid:
+        the legs are not independent, since the wing short is what pays for the
+        extra size at the money, so taking the wing close while skipping the
+        at-the-money trim leaves more net contracts than the server permits.
+        Seen in the backtest at tick 75 of heat_20260918_112741 - a 94-lot trim
+        sat 54 contracts under the deadband and left the book at 1,186 net
+        against a 1,000 limit, which is an order the server simply rejects.
+
+        So if skipping would breach, the whole desired book is traded. It is
+        legal by construction.
+        """
+        def build(deadband):
+            orders = []
+            for row in chain['rows']:
+                position = int(row['position'])
+                want = int(desired.get(row['ticker'], 0))
+                change = want - position
+                if change == 0:
+                    continue
+                threshold = max(REBALANCE_MIN,
+                                REBALANCE_FRACTION * max(abs(want),
+                                                         abs(position)))
+                # The deadband never blocks a close: going flat is always worth
+                # doing in full, however small the remainder.
+                if deadband and want != 0 and abs(change) < threshold:
+                    continue
+                orders.append((row, change))
+            return orders
+
+        orders = build(True)
+        after = {row['ticker']: int(row['position']) for row in chain['rows']}
+        for row, change in orders:
+            after[row['ticker']] += change
+        gross, net = structure.limits_used(after)
+        if gross > config.LIMIT_OPT_GROSS or net > config.LIMIT_OPT_NET:
+            return build(False)
         return orders
 
-    def execute(self, chain, strike, call, put, target):
+    def execute(self, chain, desired):
         """
         Send the option orders in chunks, hedging BETWEEN them.
 
@@ -465,7 +516,7 @@ class AutoTrader:
         """
         delta = float(chain['portfolio_delta'])
         underlying = float(chain['underlying_position'])
-        for row, lot in self.chunks(chain, strike, call, put, target, delta):
+        for row, lot in self.chunks(chain, desired, delta):
             moves = lot * (row['delta'] or 0.0) * config.CONTRACT_MULTIPLIER
             # Make room BEFORE sending, not after. Hedging only afterwards left
             # the chunk's own delta un-covered for the moment that matters: the
@@ -484,46 +535,67 @@ class AutoTrader:
             delta, underlying = self.hedge_running(delta, underlying)
         return delta, underlying
 
-    def chunks(self, chain, strike, call, put, target, delta):
+    def chunks(self, chain, desired, delta):
         """
-        The tick's orders split into chunks and ORDERED to keep delta flat.
+        The tick's orders split into chunks and ORDERED under two constraints.
 
-        Sending every call chunk and then every put chunk is what the first
-        version of this did, and it churned the hedge badly: delta walks one way
-        through the whole call leg, dragging hedges after it, then walks back
-        through the put leg dragging the opposite hedges. Measured live, RTM
-        volume rose 74% (244,598 to 425,994 shares a heat) and gave back half
-        the penalty saving in share commission.
+        LIMITS FIRST. Both option limits are enforced on submission, so every
+        intermediate state has to be legal, not just the destination. The old
+        rule - "close other strikes first" - was a special case of this that the
+        wing structure breaks: going from a long straddle to a short one has to
+        buy back the wing shorts and sell the at-the-money legs, and doing
+        either side in full first puts the book past a limit mid-resize. Seen
+        live before the rule existed: a 303-lot of K52 bounced off the net limit
+        at tick 236 because 404 lots of K50 were still on the book.
 
-        A straddle's legs have opposite-signed deltas that very nearly cancel,
-        so alternating them keeps the running delta near zero and almost no
-        hedging is needed mid-resize. Rather than hard-coding call-then-put,
-        pick at each step whichever remaining chunk leaves |delta| smallest -
-        that handles lopsided legs and strike switches too.
+        DELTA SECOND. Among the chunks that are legal to send now, take the one
+        leaving |delta| smallest. Sending every call chunk and then every put
+        chunk walks delta out and back, dragging hedges both ways - measured
+        live at +74% RTM volume (244,598 to 425,994 shares a heat), which gave
+        back half of what interleaving saved. A straddle's legs have
+        opposite-signed deltas that nearly cancel, so alternating them keeps the
+        running delta near zero and almost no hedging is needed mid-resize.
 
-        Closes still go strictly first. The net option limit is enforced on
-        submission, so capacity has to be freed before it can be used.
+        If nothing is legal - which needs a book that is already outside a limit
+        - take whichever chunk reduces the worst breach most, so the book walks
+        back inside rather than stalling.
         """
+        positions = {row['ticker']: int(row['position'])
+                     for row in chain['rows']}
         pending = []
-        for row, change in self.option_orders(chain, strike, call, put, target):
-            closing = row['strike'] != strike
+        for row, change in self.option_orders(chain, desired):
             step = self.chunk_for(row)
             remaining = abs(change)
             sign = 1 if change > 0 else -1
             while remaining > 0:
                 lot = min(step, remaining)
-                pending.append((0 if closing else 1, row, sign * lot))
+                pending.append((row, sign * lot))
                 remaining -= lot
+
+        def excess(chunk):
+            """How far past the limits the book would stand after `chunk`."""
+            row, lot = chunk
+            after = dict(positions)
+            after[row['ticker']] = after.get(row['ticker'], 0) + lot
+            gross, net = structure.limits_used(after)
+            return (max(gross - config.LIMIT_OPT_GROSS, 0)
+                    + max(net - config.LIMIT_OPT_NET, 0))
+
+        def drift(chunk):
+            row, lot = chunk
+            return abs(delta + lot * (row['delta'] or 0.0)
+                       * config.CONTRACT_MULTIPLIER)
 
         ordered = []
         while pending:
-            phase = min(p[0] for p in pending)
-            options = [p for p in pending if p[0] == phase]
-            best = min(options, key=lambda p: abs(
-                delta + p[2] * (p[1]['delta'] or 0.0) * config.CONTRACT_MULTIPLIER))
+            legal = [c for c in pending if excess(c) == 0]
+            best = (min(legal, key=drift) if legal
+                    else min(pending, key=excess))
             pending.remove(best)
-            delta += best[2] * (best[1]['delta'] or 0.0) * config.CONTRACT_MULTIPLIER
-            ordered.append((best[1], best[2]))
+            row, lot = best
+            positions[row['ticker']] = positions.get(row['ticker'], 0) + lot
+            delta += lot * (row['delta'] or 0.0) * config.CONTRACT_MULTIPLIER
+            ordered.append(best)
         return ordered
 
     def chunk_for(self, row):

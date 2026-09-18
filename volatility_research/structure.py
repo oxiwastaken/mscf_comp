@@ -66,13 +66,15 @@ WING_MIN_CONVICTION = 1.0
 
 # Take one wing from each side of spot rather than the two cheapest outright.
 #
-# Cheapest-vega-first will happily put both legs on the same side: with RTM at
-# 48.85 the two cheapest were RTM51C and RTM52C, which is 750 contracts of
-# naked upside short gamma. It is also the side RTM has to travel to reach, so
-# the position gets shorter exactly as it moves against us. A call above and a
-# put below costs a little vega ratio and buys a structure whose two halves
-# cannot both go wrong at once.
-WING_SYMMETRIC = True
+# OFF, and measured rather than assumed. Cheapest-vega-first will put both legs
+# on the same side - with RTM at 48.85 the two cheapest were RTM51C and RTM52C,
+# 750 contracts of one-sided short gamma - and the obvious fix is a call above
+# and a put below. It costs almost the whole trade: +$1,058 a heat (t 0.8)
+# symmetric against +$6,301 (t 2.5) cheapest-first, because forcing a leg onto
+# the near side forces it onto a leg whose vega is close to the money's, and
+# the vega SPREAD between what is shorted and what is bought is the entire
+# point of the structure.
+WING_SYMMETRIC = False
 
 
 def leg_cap(net_limit=None):
@@ -121,7 +123,7 @@ def wing_legs(rows, strike, spot, atm_vega, max_ratio=None, symmetric=None):
 
 def desired_book(chain, strike, target, held=None, net_limit=None,
                  gross_limit=None, wing_contracts=None, max_ratio=None,
-                 min_conviction=None):
+                 min_conviction=None, underlying=None):
     """
     {ticker: signed contracts} to hold, given a signed per-leg straddle target.
 
@@ -173,6 +175,7 @@ def desired_book(chain, strike, target, held=None, net_limit=None,
     #   gross  2A + W = 2|target| + 2W <= gross_limit
     # so the gross limit alone caps W, and it caps it at half the free gross.
     room = min(wing_contracts, (gross_limit - 2 * abs(target)) // 2)
+
     if room < 2:
         return book
 
@@ -229,7 +232,46 @@ def desired_book(chain, strike, target, held=None, net_limit=None,
     extra = placed // 2
     book[call['ticker']] = target + (extra if target > 0 else -extra)
     book[put['ticker']] = target + (extra if target > 0 else -extra)
+
+    if not hedgeable(book, target, call, put, row_by_ticker, underlying):
+        return {call['ticker']: target, put['ticker']: target}
     return book
+
+
+def hedgeable(book, target, call, put, row_by_ticker, underlying):
+    """
+    Can the shares still be there to hedge what the structure adds?
+
+    The structure raises the at-the-money position by half a contract per wing
+    contract while the RTM limit stays at 50,000 shares, and measured over 125
+    recordings it takes peak share usage from 25,733 to 39,684, with a worst
+    heat of 49,936 - 64 shares of margin. A hedge that cannot be completed is
+    the one cost in this case that is unbounded: $0.10 per delta per second,
+    for as long as it takes to get back inside.
+
+    So the test is on the delta the structure actually ADDS at today's greeks,
+    not on a worst case. A blanket "one contract needs a hundred shares" rule
+    was tried first and is roughly ten times too conservative - a straddle pair
+    nets about 0.04 delta near the money against a wing's 0.10 - which shut the
+    structure off and gave back three quarters of what it earns.
+
+    The straddle itself is never sacrificed to this. It is the view; the
+    structure is a claim on a limit, and the claim is what gives way.
+    """
+    if underlying is None:
+        return True
+    plain = {call['ticker']: target, put['ticker']: target}
+    added = 0.0
+    for ticker, quantity in book.items():
+        row = row_by_ticker.get(ticker)
+        if row is None or row.get('delta') is None:
+            continue
+        added += ((quantity - plain.get(ticker, 0)) * row['delta']
+                  * config.CONTRACT_MULTIPLIER)
+    # Hedging that delta means holding the opposite of it in shares, on top of
+    # whatever is held now. The free delta band pays for the last stretch.
+    return (abs(abs(underlying) + abs(added)) - config.DELTA_LIMIT
+            <= config.LIMIT_RTM_GROSS)
 
 
 def limits_used(book):

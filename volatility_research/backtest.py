@@ -392,8 +392,9 @@ def run(snapshots, policy, verbose=False, forecast_news=None,
             # What the limits allow us to hold for this view. With the wing
             # structure switched off this is exactly the straddle, so the
             # comparison against the shipped model stays like-for-like.
-            desired = structure.desired_book(chain, target_strike, target,
-                                             held=book.positions)
+            desired = structure.desired_book(
+                chain, target_strike, target, held=book.positions,
+                underlying=book.positions.get(config.UNDERLYING, 0))
             changes = order_changes(chain, desired, book.positions,
                                     rebalance_fraction)
             for row, change in changes:

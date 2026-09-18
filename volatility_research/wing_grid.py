@@ -15,7 +15,15 @@ import sys
 import sweep
 
 POLICY = 'ratchet+news'
-BASE = {'structure.WING_CONTRACTS': 0, 'structure.WING_SYMMETRIC': True}
+# Every knob the experiment touches is pinned here, including the ones the
+# variants do not vary. A base that leaves one at its module default is a base
+# that silently changes when the default does - which is exactly how the first
+# run of this grid ended up scoring symmetric wings and contradicting compare.py.
+BASE = {'structure.WING_CONTRACTS': 0, 'structure.WING_SYMMETRIC': False,
+        'structure.WING_MAX_VEGA_RATIO': 1.0,
+        'structure.WING_MIN_EXTRA_VEGA': 0.0,
+        'structure.WING_MIN_CONVICTION': 1.0,
+        'STRIKE_SWITCH_DISTANCE': 1.5, 'STAND_DOWN_CLOSES': True}
 
 
 def variants():
