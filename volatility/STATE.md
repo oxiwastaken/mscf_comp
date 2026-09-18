@@ -644,6 +644,82 @@ with `--manual-hedge` or the `a` key. `record.py` and `replay.py` are read-only.
 
 ---
 
+## THE PLAN — target $150,000 per trader, agreed 18 Sep
+
+**Goal, set by Hayden: no less than $150,000 average P&L per trader across 10
+heats.** Not a team figure — per trader. Team P&L is the sum of both members, so
+this is $300k of team P&L if both run the bot.
+
+Why that number: last year's RITCxCMU results, filtered to the teams that
+actually built a model (`volatility_research/compete.py`). The field as a whole
+is not the benchmark — 27% of team-heats lost money and the median team-heat was
+$40,555. The teams that built something:
+
+| rank | team | per trader / heat |
+|---|---|---|
+| 1 | JNID | $263,468 — outlier, 1.8x the next team |
+| 2 | TGWK | $132,566 |
+| 3 | HUBT | $143,404 |
+| 4 | XIAN | $131,286 |
+| 5 | ANSC | $128,104 |
+
+We are at roughly **$125,000 live-equivalent**, i.e. rank 5–6. **$150k is the
+rank 2–3 threshold.** Two changes close the gap.
+
+### Change 1 — interleave the hedge with the option orders
+
+**Problem.** The trader sends every option order, then the RTM hedge. The delta
+penalty accrues per **second**, and a full resize is ten chunked option orders,
+so the book carries the entire un-hedged delta for about a second each time.
+Measured live: **$86,156 of penalty**, peak |delta| **47,713**. A straddle is
+only delta-neutral *at the money*, so a resize at a strike that spot has drifted
+away from spikes hard — tick 225 sold 500 RTM52C and 500 RTM52P with spot at
+51.23, hit +47,713 delta, and paid $4,071 for that one second.
+
+**Fix.** Send the option orders in chunks and hedge between them, so delta never
+accumulates. Recompute the running delta after each chunk rather than once at
+the end.
+
+**Worth** ~$7,600 a heat. Low risk — it changes order sequencing, not the
+strategy. **Do this first; it cannot make the model worse.**
+
+### Change 2 — react faster, and rebalance continuously
+
+**Problem.** Two settings deliberately slow the trader down:
+`REBALANCE_ON_NEWS_ONLY = True` holds the position between news releases, and
+`GAP_SMOOTHING = 0.15` averages the signal over ~10 ticks. Both were added
+because the signal was noisy, and both were correct *for that signal*.
+
+**Evidence they now cost us** (`volatility_research/ceiling.py`) — a perfect
+forecast of where the maker's quote is heading, with the execution handicaps
+removed:
+
+| policy | horizon | mean |
+|---|---|---|
+| news-gated | 25 | $153,634 |
+| **continuous** | **10** | **$187,029** |
+| shipped model | — | $132,377 = **71%** |
+
+So there is **29% of headroom**, short horizons beat long ones, and continuous
+beats news-gating *once the signal is good enough*. The earlier claim that we
+captured 94% of the ceiling was wrong — that oracle was handed the shipped
+configuration's handicaps, so it measured the ceiling of the config, not of the
+structure.
+
+**Fix.** Build a faster signal and let it trade continuously.
+
+**Risk.** Real. Turning news-gating off with today's noisy signal is *worse*,
+which is exactly why it is on. This must be proven on the 95 recordings before
+it goes near a live heat.
+
+### How results get tracked
+
+Both changes are judged on paired same-heat backtests over the whole recording
+library, and on as many live practice heats as can be run before Saturday.
+Single live heats prove nothing here — identical code has returned −$15k and
++$162k. `record.py` must be running in a loop; it exits at the end of each heat
+and it silently overwrites when given a fixed `--name`.
+
 ## Next moves, in order
 
 1. ~~Smoke-test against the practice server~~ — **done 17 Sep.** Read path
