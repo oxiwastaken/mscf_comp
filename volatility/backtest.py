@@ -43,6 +43,11 @@ from replay import load, spot_of
 # Two ways to cut the between-news churn, tested side by side:
 #   raising the deadband so small target moves are ignored, versus
 #   refusing to resize at all until new information arrives.
+# Whether the trader hedges BETWEEN its option chunks (it does, since Change 1).
+# Flipping this off prices the old send-everything-then-hedge behaviour, which
+# is the only way to measure what interleaving was worth.
+INTERLEAVED_HEDGE = True
+
 POLICIES = (
     'continuous',        # today's behaviour, 25% deadband
     'deadband-40',
@@ -220,6 +225,29 @@ def run(snapshots, policy, verbose=False):
                     continue
                 book.trade_option(leg, change)
             pending_resize = False
+
+        # ------------------------------------------- transient delta penalty
+        # This backtest hedges inside the same tick off the exact post-trade
+        # delta, so for a long time it charged ZERO delta penalty on all 95
+        # recordings while a live run paid $86,156. The penalty accrues per
+        # SECOND, and a resize used to send all of its option legs before the
+        # RTM hedge went out, so the book carried the un-hedged delta for about
+        # a second each time.
+        #
+        # With interleaved hedging (autotrader.execute) the chunks are sized so
+        # no single one can push delta past the band, so the transient is gone
+        # by construction. Set INTERLEAVED_HEDGE False to price the old
+        # behaviour and measure what the change is worth.
+        if not INTERLEAVED_HEDGE:
+            pre = [dict(r, position=book.positions.get(r['ticker'], 0))
+                   for r in chain['rows']]
+            breach = max(abs(vol_engine.portfolio_delta(
+                pre, book.positions.get(config.UNDERLYING, 0)))
+                - config.DELTA_LIMIT, 0.0)
+            if breach:
+                charge = breach * config.DELTA_PENALTY_RATE
+                book.cash -= charge
+                book.penalty += charge
 
         # ----------------------------------------------------------- hedge
         rows = [dict(r, position=book.positions.get(r['ticker'], 0))

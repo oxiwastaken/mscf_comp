@@ -82,10 +82,12 @@ def apply(settings):
     tunables that live in `config` (the hedge band, the option limits).
     """
     for key, value in settings.items():
-        if key.startswith('config.'):
-            setattr(config, key.split('.', 1)[1], value)
-        else:
-            setattr(at, key, value)
+        module, _, name = key.rpartition('.')
+        # Worker processes are spawned fresh and re-import everything, so a
+        # module global set in the parent does NOT reach them. Anything a sweep
+        # needs to vary has to travel in the settings dict.
+        setattr({'config': config, 'backtest': backtest}.get(module, at),
+                name, value)
 
 
 def score_one(args):
