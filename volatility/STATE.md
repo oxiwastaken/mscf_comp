@@ -317,9 +317,17 @@ one-tick lag.
 | 7 | +$95,650 | **$15,397** | **5,092** | 260,639 | news-gated |
 | 8 | **+$162,011** | $20,487 | 8,036 | 220,762 | news-gated |
 | 9 | +$33,437 | $16,290 | 5,984 | 216,120 | news-gated |
+| 11 | +$60,938 | $15,577 | 6,812 | **97,640** | news-gated |
 
-Mean of the eight since the hedge fix: **+$81,469**.
-Mean of the four news-gated heats: **+$93,056**.
+Mean of the nine since the hedge fix: **+$79,144**.
+Mean of the five news-gated heats: **+$86,632**.
+
+(Heat 10 excluded — see below.)
+
+Heat 11 shows the news-gating benefit compounding into the hedge: RTM volume
+fell to 97,640 shares on 14 sends, against 200–300k on 30–50 sends previously.
+A position that is not being resized every tick does not need re-hedging every
+tick either, so share friction dropped to $1,952 — the lowest recorded.
 
 **Variance between heats is enormous and is the dominant fact here.** Heats 8
 and 9 ran byte-identical code back to back and returned +$162,011 and +$33,437 —
