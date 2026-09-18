@@ -680,8 +680,41 @@ away from spikes hard — tick 225 sold 500 RTM52C and 500 RTM52P with spot at
 accumulates. Recompute the running delta after each chunk rather than once at
 the end.
 
-**Worth** ~$7,600 a heat. Low risk — it changes order sequencing, not the
-strategy. **Do this first; it cannot make the model worse.**
+**DONE and CONFIRMED LIVE, 18 Sep — tagged `change1-confirmed`.**
+
+Measured from the trader logs, per heat:
+
+| | original | Change 1 |
+|---|---|---|
+| delta penalty | $8,381 | **$3,749** |
+| share cost | $4,892 | $5,243 |
+| peak abs delta | 47,713 | 21,135 |
+| hedge shares per contract | 18.4 | **19.0** |
+
+**Net +$4,281 a heat**, not the $7,600 first projected. Residual delta spikes
+remain — peak 21,135 still breaches the band — so there is perhaps $3,700 a
+heat still on the table here. Left deliberately: Change 2 is worth an order of
+magnitude more.
+
+**It got worse before it got better, and the reason is worth remembering.**
+The first version saved the penalty and gave half of it straight back, because
+`option_orders` emitted every call chunk then every put chunk — so delta walked
+out across the call leg dragging hedges with it, then walked back across the
+put leg dragging the opposite ones. Hedge volume rose 74%. A straddle's legs
+carry opposite-signed deltas that nearly cancel, so the churn was entirely
+self-inflicted by ordering. `chunks()` now picks whichever remaining chunk
+leaves |delta| smallest.
+
+**The backtest could not see any of this** — it models one hedge per tick, not
+the order stream inside a tick. It confidently predicted +$7,591. Only the live
+logs showed the regression. `track.py --diagnose` exists so that this class of
+bug shows up in ONE heat: hedge volume and delta breaches follow almost
+deterministically from the code, while single-heat P&L is worthless at a $58k
+standard deviation.
+
+Also fixed on the way: `hedge()` after `execute()` re-hedged the same delta,
+because it reads `chain['underlying_position']` — captured before the tick's
+share trades and blind to every hedge `execute()` had just sent.
 
 ### Change 2 — react faster, and rebalance continuously
 
