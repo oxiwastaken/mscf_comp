@@ -31,12 +31,18 @@ So **$400,000 requires capturing ~69 volatility points of convergence per
 heat.** Observed gaps have been 7–11 points across four news releases. Even
 capturing every gap perfectly and in full lands nearer **$150–200k**.
 
-**Honest assessment: $400k average is very likely above the structural ceiling
-at the current position limit.** It is worth chasing as a stretch target — the
-levers below could plausibly double or triple today's number — but do not
-mistake hitting $200k for failure, and do not breach limits reaching for it
-(orders that exceed them are rejected, and heat 1 showed an unhedgeable book
-costs $2,002/second).
+**Honest assessment: $400k average is probably above the structural ceiling at
+the current position limit — but the estimate above is likely conservative.**
+Heat 8 returned **+$162,011**, already at the top of that $150–200k band, which
+says the simple vega calculation understates the result. The missing term is
+gamma scalping: a delta-hedged straddle earns the integral of gamma against
+(realised − implied) *variance* over the hold, not just vega × the vol gap, and
+that compounds when a position is held across a whole week rather than trimmed.
+
+So treat $400k as a stretch target that the levers below could plausibly bring
+within reach, rather than as arithmetically impossible. Do not mistake $250k for
+failure, and do not breach limits reaching for it — offending orders are
+rejected outright, and heat 1 showed an unhedgeable book costs $2,002/second.
 
 ### Levers, largest first
 
@@ -308,9 +314,11 @@ one-tick lag.
 | 4 | +$112,634 | $29,255 | 12,264 | 236,364 | same |
 | 5 | +$109,378 | $22,456 | 8,044 | 318,377 | same |
 | 6 | +$81,126 | $21,696 | 8,952 | 189,576 | **+ news-gated** |
-| 7 | **+$95,650** | **$15,397** | **5,092** | 260,639 | news-gated |
+| 7 | +$95,650 | **$15,397** | **5,092** | 260,639 | news-gated |
+| 8 | **+$162,011** | $20,487 | 8,036 | 220,762 | news-gated |
 
-Mean of the six since the hedge fix: **+$76,003**.
+Mean of the seven since the hedge fix: **+$88,290**.
+Mean of the three news-gated heats: **+$112,929**.
 
 Progression: heat 1→2 was the stale-delta hedge fix plus recalibrated sizing.
 2→3 was anti-churn (option churn −60%, friction −57%). 5→6 was news-gating,
