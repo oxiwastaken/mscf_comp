@@ -64,8 +64,21 @@ from rit_api import ApiException, RitClient
 # the trader sized at roughly 6% of capacity all heat. These values clear the
 # round-trip breakeven with a margin and reach full size at a gap this market
 # actually produces.
-ENTRY_VOL_EDGE = 0.008
-FULL_SIZE_VOL_EDGE = 0.025
+#
+# Swept over 94 recorded heats (`sweep.py --sizing`). Full size at 0.008 rather
+# than 0.025 is worth +$19,554 per heat, paired t = 9.5, and it also lifts the
+# WORST heat from $715 to $14,940 - it is not a variance trade. The surface is a
+# broad plateau: every combination with FULL_SIZE <= 0.008 scores within $700 of
+# the best, so nothing here is fitted to a knife edge.
+#
+# The reason is the ramp's own arithmetic rather than anything subtle. The old
+# span mapped a 1.7-point gap onto 0-500 contracts, and the gaps this market
+# actually produces are 1-2 points, so the book sat near half size during real
+# edge. Breakeven is 0.42 vol points held to settlement; above roughly twice
+# that the position should simply be at the limit, because the limit - not the
+# size of the gap - is what caps the payoff.
+ENTRY_VOL_EDGE = 0.002
+FULL_SIZE_VOL_EDGE = 0.008
 # Close out once the gap decays below this - the maker has learned. Held below
 # the open-and-hold breakeven, since exiting costs more than sitting still.
 EXIT_VOL_EDGE = 0.003

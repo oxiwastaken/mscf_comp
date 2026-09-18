@@ -13,12 +13,26 @@ reason)."** Optimise for expected P&L, not for safety — but stay inside the
 case's hard limits, which are enforced server-side and reject offending orders
 outright.
 
-Current standing: **+$87,735 average** over the six news-gated heats
-(best +$162,011). The goal needs roughly **3x**.
+Current standing: **+$111,054 average** over 83 clean live heats from the
+overnight run, best +$251,691. With the recalibrated sizing ramp (18 Sep) the
+backtest mean is **$134,980**, i.e. roughly **$125,000 live-equivalent**.
 
-Revised down from an initial $400k after the ceiling arithmetic below. 3x is
-demanding but is *not* obviously past the structural limit the way 5x was — the
-gross-capacity lever alone is worth ~1.55x, and it is unbuilt.
+### SCORING: the goal is a TWO-TRADER number
+
+Confirmed 18 Sep from the official RITCx CMU page. The volatility case requires
+**two students per team**, and *"the penalty-adjusted final P&L of all
+participating members of a team are **summed** to form a dollar value of the
+team P&L."* Teams are then **ranked** per heat and the ranks averaged; the two
+cases are weighted 50/50.
+
+So **any headline figure for this case is a two-trader total.** Running the bot
+on both team members' accounts doubles the team number for zero extra work, and
+is by far the cheapest lever available. At $125k live-equivalent per trader that
+is ~$250k of team P&L. Absolute P&L only matters relative to other teams.
+
+Revised down from an initial $400k after the ceiling arithmetic below. The
+gross-capacity lever that was supposed to supply 1.55x of it **was built and
+tested and does not work** — see below.
 
 ### The ceiling, and why it is where it is
 
@@ -61,23 +75,62 @@ Hard constraint regardless: **do not breach position limits reaching for this.**
 Offending orders are rejected outright, and heat 1 showed an unhedgeable book
 costs $2,002/second.
 
-### Levers, largest first
+### Levers — ALL TESTED 18 Sep over 95 recorded heats (`sweep.py`)
 
-1. **Use gross capacity, not just net.** GROSS limit is 2,500 while NET is
-   1,000. Long ~1,750 ATM contracts against short ~750 **low-vega wings** keeps
-   net at 1,000 while lifting vega roughly **55%** (the wings consume net
-   capacity cheaply because their vega is tiny — the same property that makes
-   them useless to trade on their own). **Biggest single lever, not yet built.**
-2. **Reach full size sooner.** `FULL_SIZE_VOL_EDGE = 0.025` means a 2.5-point
-   gap is needed for max position. Most observed gaps are 1–2 points, so the
-   book is often half-sized during real edge.
-3. **Gamma-aware hedge band.** Friction is down to ~$15k/heat but is now
-   dominated by share hedging (heat 7: $10,184 of $15,397). Widen the band when
-   gamma is low, tighten near expiry.
-4. **Trade later into the heat.** `NO_NEW_AFTER = 0.90` stops new positions at
-   tick 270; the final news release may still be tradeable.
-5. **Forecast quality.** `fixed` beat `market` on RMSE (3.73% vs 5.57%). A
-   hybrid — market-anchored but shrunk toward the observed vol mean — is untested.
+Only one of these was real. The others are settled; do not spend time on them
+again without new information.
+
+1. ~~**Use gross capacity, not just net.**~~ **BUILT, TESTED, DEAD.** Long 1,750
+   ATM against short 750 wings lost roughly half the P&L on the first heat. The
+   1.55x came from one observation at tick ~190, late in a heat, when vega has
+   collapsed toward the money. Early in a heat — when positions are largest and
+   gaps widest — `sigma*sqrt(T)` is large relative to the 48–52 strike range and
+   the wings are **not** low-vega. Measured min/max vega by tick: 0.59 at t=25,
+   0.61 at t=100, 0.38 at t=150, 0.17 at t=200, 0.03 at t=275. At a 0.6 ratio
+   the structure trades 75% more contracts for ~30% more vega and needs ~2 vol
+   points just to cover the extra fees; at the 0.93 ratio seen live early in a
+   heat it needs ~10. Observed gaps are 1–5. **Do not rebuild this.**
+2. **Reach full size sooner.** ✅ **THE ONE THAT WORKED.** `FULL_SIZE_VOL_EDGE`
+   0.025 → 0.008 and `ENTRY_VOL_EDGE` 0.008 → 0.002 is worth **+$19,554 a heat,
+   paired t = 9.5**, and lifts the worst heat from $715 to $14,940. Broad
+   plateau — everything with `FULL_SIZE <= 0.008` scores within $700.
+3. **Gamma-aware hedge band.** Marginal. A wider band (trigger 6,900 → target
+   6,500) is worth **+$4,307, t = 3.3** — mostly saved commission, since delta
+   inside ±7,000 is free anyway. Not yet applied to this model.
+4. **Trade later into the heat.** Nothing there. `NO_NEW_AFTER` 0.90 → 1.00 is
+   −$2,069 (t = −1.0).
+5. ~~**Forecast quality.**~~ **DEAD, and this was the big surprise.** See the
+   oracle results below: we already capture **94%** of what a trader who knew
+   the maker's future quotes would earn. There is essentially nothing left here.
+
+### The oracle — how much money is actually in a heat (`volatility_punt/oracle.py`)
+
+Two perfect-foresight traders, same fills, fees, hedging and limits, 95 heats:
+
+| | mean | best heat | heats ≥ $500k |
+|---|---|---|---|
+| tuned model | $132,377 | $326,764 | 0 / 95 |
+| knows every weekly sigma at t=1 | $101,618 | $266,254 | 0 / 95 |
+| **knows the maker's future quote** | $141,527 | $318,087 | **0 / 95** |
+
+Two conclusions, both important:
+
+- **This strategy's ceiling is ~$320k on the best heat ever recorded**, and we
+  are already at 94% of it. Tuning and forecasting are exhausted.
+- **Knowing the true volatility is WORSE than what we do now.** Not a bug. The
+  maker never converges to true integrated variance because it does not know
+  future weeks either. The edge is predicting **where the maker's quote is
+  going**, not what vol truly is — which is exactly what `market` mode does, and
+  why it beats both `fixed` and a perfect sigma oracle.
+
+Ruled out cheaply on the same day: `limit_order_rebate` is **0.0**, so there is
+no liquidity rebate and passive market-making earns nothing. Limits are hard —
+the API reports `is_enforce_trading_limits: true` and the PDF says
+*"participants will not be able to exceed them."*
+
+**Other teams reportedly clear $1m in a heat (≈$500k per trader), which is above
+this strategy's perfect-foresight ceiling. They run a materially different
+model. Finding it is the open problem** — not tuning this one.
 
 **Test every one of these with `backtest.py` on the recorded heats before
 trading it live.** Seven recordings exist. Same-heat comparison is the only
@@ -420,15 +473,25 @@ converges toward our forecast the gap shrinks, and continuous rebalancing reacts
 by *trimming* — selling out of the very convergence that pays us. Holding to the
 next release captures the whole move.
 
-Configuration that produced heats 3 and 4 (do not change without a reason):
+Current configuration, after the 18 Sep sweep over 95 heats (do not change
+without a same-heat backtest showing why):
 
 ```
 TAIL_VOL_MODE       market
-ENTRY_VOL_EDGE      0.008     FULL_SIZE_VOL_EDGE  0.025
+ENTRY_VOL_EDGE      0.002     FULL_SIZE_VOL_EDGE  0.008
 EXIT_VOL_EDGE       0.003     GAP_SMOOTHING       0.15
 REBALANCE_MIN       25        REBALANCE_FRACTION  0.25
 STRIKE_SWITCH_DISTANCE 1.5    NO_NEW_AFTER        0.90
 ```
+
+Everything except the two sizing values was swept and left alone because it was
+already optimal to within noise: exit edge, gap smoothing, strike-switch
+distance, rebalance fraction and the hedge band all moved the mean by less than
+$1.5k. The earlier tuning was at its local optimum.
+
+First two live heats on the new ramp: **+$156,776** and **+$27,304** — the same
+enormous heat-to-heat variance as always, which is why the 95-heat paired
+comparison is the evidence and two live heats are not.
 
 ### Anti-churn changes that produced heat 3
 
@@ -537,7 +600,15 @@ Case length is read live from `ticks_per_period`, never hardcoded.
 | `api_key.txt` | RIT API key. **Gitignored** — per-machine credential |
 | `record.py` | Read-only capture of a live heat → `heats/*.jsonl` |
 | `replay.py` | Scores every mode on identical recorded ticks |
-| `test_engine.py` | 87 offline checks, no server needed |
+| `sweep.py` | Parameter sweeps over the whole recording library. Paired per-heat comparison, bootstrapped 10-heat averages |
+| `test_engine.py` | 139 offline checks, no server needed |
+
+`../volatility_punt/` is a separate fork for higher-risk experiments, so this
+model is never put at risk. It shares these recordings rather than copying
+them. `volatility_punt/PUNT.md` records why no punt dial exists: even pinned at
+the full 1,000-contract limit for every tick of every heat, the per-heat
+standard deviation is $58,463 against this model's $58,854. The limits cap
+variance as hard as they cap the mean.
 
 `RITCx Volatility Trading Case base script-REST API.py` is Rotman's original
 template, kept for reference. It is **not** on the execution path.

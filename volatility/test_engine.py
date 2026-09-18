@@ -370,17 +370,20 @@ flat_chain = {'underlying_position': 0, 'spot': 50.0}
 
 t = make_trader()
 check('no position below the entry threshold',
-      t.target_legs(0.005, flat_chain, 1000) == 0)
+      t.target_legs(0.001, flat_chain, 1000) == 0)
 check('a gap just over entry takes a small position',
-      0 < t.target_legs(0.009, flat_chain, 1000) < 0.2 * 500,
-      f'got {t.target_legs(0.009, flat_chain, 1000)}')
+      0 < t.target_legs(0.0025, flat_chain, 1000) < 0.2 * 500,
+      f'got {t.target_legs(0.0025, flat_chain, 1000)}')
 check('size ramps monotonically with the gap',
-      t.target_legs(0.010, flat_chain, 1000)
-      < t.target_legs(0.015, flat_chain, 1000)
-      < t.target_legs(0.020, flat_chain, 1000))
-check('a gap this market actually produces reaches real size',
-      t.target_legs(0.018, flat_chain, 1000) > 0.4 * 500,
-      f'got {t.target_legs(0.018, flat_chain, 1000)}')
+      t.target_legs(0.003, flat_chain, 1000)
+      < t.target_legs(0.005, flat_chain, 1000)
+      < t.target_legs(0.007, flat_chain, 1000))
+# The ramp is deliberately steep. Swept over 94 recorded heats, anything past
+# roughly twice the 0.42-point breakeven should already be at the limit, because
+# the net-contract cap is what bounds the payoff - not the size of the gap.
+check('a gap this market actually produces reaches full size',
+      t.target_legs(0.008, flat_chain, 1000) == 500,
+      f'got {t.target_legs(0.008, flat_chain, 1000)}')
 check('a large gap goes to the net-limit cap',
       t.target_legs(0.10, flat_chain, 1000) == 500)
 check('negative gap means short volatility',
