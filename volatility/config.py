@@ -7,9 +7,35 @@ Values marked SPEC are case rules - do not change them without re-reading the PD
 Values marked TUNABLE are our own trading choices.
 """
 
+import os
+
 # ---------------------------------------------------------------- connection
 API_HOST = 'http://localhost:9999'
-API_KEY = {'X-API-Key': 'Rotman'}
+
+
+def _load_api_key():
+    """
+    Resolve the RIT API key without committing it.
+
+    Order: the RIT_API_KEY environment variable, then a local `api_key.txt`
+    next to this file (gitignored), then Rotman's documented default. The key
+    is per-machine and belongs in neither the repo nor the history.
+    """
+    from_env = os.environ.get('RIT_API_KEY')
+    if from_env:
+        return from_env.strip()
+    local = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'api_key.txt')
+    try:
+        with open(local, encoding='utf-8') as handle:
+            key = handle.read().strip()
+            if key:
+                return key
+    except OSError:
+        pass
+    return 'Rotman'
+
+
+API_KEY = {'X-API-Key': _load_api_key()}
 
 # ------------------------------------------------------------------ case spec
 # SPEC: one trading year is 240 days (20 days x 12 months).
@@ -81,6 +107,20 @@ MIN_EDGE_DOLLARS = 0.03
 # TUNABLE: minimum implied-vol gap (in vol points, 0.02 = 2%) to flag a
 # dispersion trade between two strikes.
 MIN_DISPERSION_VOL = 0.015
+
+# TUNABLE: reject an option whose implied vol is not meaningfully determined by
+# its own quote. The case guarantees a 2-cent spread on every option, but two
+# cents means very different things depending on vega: measured live on the
+# practice server at tick ~190, two cents was worth 0.63 vol points on RTM48C
+# (vega 0.032) and 4.08 vol points on RTM52C (vega 0.0006).
+#
+# Without this filter the low-vega wings generate large fake dispersion and drag
+# the market-IV average around - and in 'market' mode that average is the prior
+# for unannounced weeks, so the noise would leak straight into the forecast.
+#
+# Low-vega options are bad volatility vehicles anyway: at a $2.00-per-contract
+# fee, a $0.02 option pays 100% of its premium in commission.
+MAX_IV_SPREAD = 0.015          # vol points of noise implied by the quote width
 
 # ------------------------------------------------------------------- hedging
 # TUNABLE: hedge into the band with a buffer rather than flattening to zero.

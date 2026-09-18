@@ -128,6 +128,35 @@ class Dashboard:
         self._send(config.UNDERLYING, action, quantity, config.MAX_TRADE_RTM)
 
     # ----------------------------------------------------------------- render
+    def render_idle(self, case, chain):
+        """Shown when no heat is running. Deliberately displays NO signals."""
+        status = case.get('status', '?')
+        out = [
+            f'{BOLD}RITCx VOLATILITY{RESET}   {YELLOW}waiting for a heat{RESET}',
+            '',
+            f'  case      {case.get("name", "?")}',
+            f'  status    {YELLOW}{status}{RESET}',
+            f'  tick      {case.get("tick", 0)}/{case.get("ticks_per_period", "?")}',
+            f'  last {config.UNDERLYING}  {chain["spot"]:.2f}  {DIM}(stale){RESET}',
+            '',
+        ]
+        if status != 'ACTIVE':
+            out.append(f'{DIM}  The case is not running. Start a heat in the RIT'
+                       f' client.{RESET}')
+        else:
+            out.append(f'{DIM}  Case is active but there is no two-sided quote'
+                       f' yet.{RESET}')
+        out.append(f'{DIM}  No implied vols, edges or hedges are shown while'
+                   f' quotes are dead -{RESET}')
+        out.append(f'{DIM}  between heats the API returns bid=ask=0 and any'
+                   f' signal would be fiction.{RESET}')
+        out.append('')
+        for message in self.messages:
+            out.append('  ' + message)
+        out.append(f'\n{DIM}  [q]uit{RESET}')
+        sys.stdout.write('\033[H\033[J' + '\n'.join(out) + '\n')
+        sys.stdout.flush()
+
     def render(self, chain, case, suggestion, option_gross, option_net):
         out = []
         tick, total = chain['tick'], chain['ticks_total']
@@ -164,7 +193,14 @@ class Dashboard:
         for row in chain['rows']:
             action, colour = '', ''
             buy, sell = row['buy_edge'], row['sell_edge']
-            if buy is not None and buy >= config.MIN_EDGE_DOLLARS:
+            if not row['tradeable']:
+                # Vega too low for the 2-cent quote to pin its IV. Any "edge"
+                # here is quote rounding, and at $2/contract the fee can be
+                # the whole premium.
+                noise = row['iv_spread']
+                action = ('noisy +/-%.1f%%' % (noise * 100)) if noise else 'no IV'
+                colour = DIM
+            elif buy is not None and buy >= config.MIN_EDGE_DOLLARS:
                 action, colour = f'BUY  (+{buy:.3f})', GREEN
             elif sell is not None and sell >= config.MIN_EDGE_DOLLARS:
                 action, colour = f'SELL (+{sell:.3f})', RED
@@ -261,6 +297,17 @@ class Dashboard:
             suggestion = vol_engine.hedge_suggestion(
                 chain['portfolio_delta'], limit=self.delta_limit)
 
+            # Between heats the API reports bid=ask=0 while `last` still holds
+            # the previous heat's settlement prices. Nothing may trade on that.
+            active = case.get('status') == 'ACTIVE' and chain['live']
+            if not active:
+                self.render_idle(case, chain)
+                key = read_key()
+                if key == 'q':
+                    break
+                time.sleep(0.5)
+                continue
+
             # Auto-hedge. The delta penalty accrues every second and hedging
             # needs no judgement - the target is a closed-form number - so a
             # human in this loop adds nothing and costs money. Option entry
@@ -312,8 +359,8 @@ class Dashboard:
             time.sleep(config.REFRESH_SECONDS)
 
     def _best(self, chain, field):
-        candidates = [r for r in chain['rows']
-                      if r[field] is not None and r[field] >= config.MIN_EDGE_DOLLARS]
+        candidates = [r for r in chain['rows'] if r['tradeable']
+                      and r[field] is not None and r[field] >= config.MIN_EDGE_DOLLARS]
         return max(candidates, key=lambda r: r[field]) if candidates else None
 
     def dispersion_pair(self, chain):

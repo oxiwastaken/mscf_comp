@@ -289,6 +289,51 @@ check('it is the most dispersed strike',
 check('and it is the one worth selling',
       target['sell_edge'] == max(r['sell_edge'] for r in chain['rows']))
 
+# Dead quotes between heats. Observed live: the API returns bid=ask=0.0 while
+# `last` still holds the previous heat's settlement prices. Falling back to
+# `last` invented implied vols out of nothing, so it must not happen.
+print('\ndead quotes between heats')
+dead = [{'ticker': 'RTM', 'bid': 0.0, 'ask': 0.0, 'last': 48.79, 'position': 0}]
+for strike, last in ((48, 0.79), (49, 0.02), (50, 0.02), (51, 0.02), (52, 0.02)):
+    for suffix in ('C', 'P'):
+        dead.append({'ticker': f'RTM{strike}{suffix}', 'bid': 0.0, 'ask': 0.0,
+                     'last': last, 'position': 0})
+
+check('mid of a dead quote is None',
+      vol_engine._mid({'bid': 0.0, 'ask': 0.0, 'last': 48.79}) is None)
+check('mid of a live quote is the midpoint',
+      close(vol_engine._mid({'bid': 1.17, 'ask': 1.19, 'last': 1.18}), 1.18))
+check('one-sided quote is not a mid',
+      vol_engine._mid({'bid': 1.17, 'ask': 0.0, 'last': 1.18}) is None)
+
+dead_chain = vol_engine.build_chain(dead, 0, 300, {1: 0.28}, mode='fixed')
+check('chain flags itself as not live', dead_chain['live'] is False)
+check('stale spot still shown for display', close(dead_chain['spot'], 48.79))
+check('no implied vol is invented from settlement prices',
+      all(r['market_iv'] is None for r in dead_chain['rows']))
+check('nothing is tradeable on dead quotes',
+      not any(r['tradeable'] for r in dead_chain['rows']))
+check('no dispersion is reported',
+      all(r['dispersion'] is None for r in dead_chain['rows']))
+
+live_chain = vol_engine.build_chain(securities, 0, 300, {1: 0.22}, mode='fixed')
+check('a live chain flags itself live', live_chain['live'] is True)
+
+# Low-vega wings must be excluded: a 2-cent spread cannot pin their IV.
+print('\nvega filter')
+check('near-the-money strikes are tradeable',
+      any(r['tradeable'] for r in live_chain['rows']))
+wide = [dict(s) for s in securities]
+for sec in wide[1:]:
+    if sec['ticker'] in ('RTM52C', 'RTM48P'):
+        sec['bid'], sec['ask'] = 0.01, 0.03      # 2 cents on a ~2 cent option
+short = vol_engine.build_chain(wide, 297, 300, {4: 0.22}, mode='fixed')
+noisy = [r for r in short['rows'] if not r['tradeable']]
+check('near expiry, low-vega options are filtered out', len(noisy) > 0)
+check('filtered options carry an iv_spread or no IV at all',
+      all(r['iv_spread'] is None or r['iv_spread'] > config.MAX_IV_SPREAD
+          for r in noisy))
+
 # Missing underlying must fail loudly, not silently price off zero.
 try:
     vol_engine.build_chain([{'ticker': 'RTM48C', 'bid': 1, 'ask': 1.02,

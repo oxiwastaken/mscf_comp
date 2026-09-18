@@ -172,7 +172,13 @@ def build_chain(securities, tick, ticks_total, week_vols, mode=None):
             f'{sorted(by_ticker)}'
         )
 
-    spot = _mid(underlying) or underlying.get('last') or 0.0
+    spot = _mid(underlying)
+    live = spot is not None
+    if not live:
+        # No two-sided market: between heats, or the feed has dropped. Fall back
+        # to `last` only so the spot can still be displayed, and flag it - every
+        # downstream signal must treat this as unusable.
+        spot = underlying.get('last') or 0.0
     t_years = time_to_expiry(tick, ticks_total)
 
     # Pass 1: market implied vols. These depend only on quoted prices, never on
@@ -197,8 +203,40 @@ def build_chain(securities, tick, ticks_total, week_vols, mode=None):
             'market_iv': solve_implied_vol(mid, spot, strike, t_years, flag),
         })
 
-    valid_ivs = [r['market_iv'] for r in rows if r['market_iv']]
-    market_avg_iv = sum(valid_ivs) / len(valid_ivs) if valid_ivs else None
+    # How much implied-vol uncertainty the quote width alone creates. Vega here
+    # is per vol POINT (py_vollib convention), so a 2-cent spread on an option
+    # with vega 0.0319 pins IV to 0.63 vol points, while the same 2 cents on
+    # vega 0.0006 leaves it undetermined across 30-plus. Anything wider than
+    # MAX_IV_SPREAD carries no usable information and is excluded from both the
+    # market average and the tradeable set.
+    for row in rows:
+        row['market_vega'] = None
+        row['iv_spread'] = None
+        row['tradeable'] = False
+        if not row['market_iv'] or t_years <= 0:
+            continue
+        try:
+            vega = analytical.vega(row['flag'], spot, row['strike'], t_years,
+                                   config.RISK_FREE_RATE, row['market_iv'])
+        except Exception:
+            continue
+        row['market_vega'] = vega
+        width = (row['ask'] - row['bid']) if (row['bid'] and row['ask']) else None
+        if vega and vega > 0 and width:
+            row['iv_spread'] = (width / vega) / 100.0
+            row['tradeable'] = row['iv_spread'] <= config.MAX_IV_SPREAD
+
+    # Vega-weight the market average so a noisy wing cannot drag it. In
+    # 'market' mode this average becomes the prior for unannounced weeks, so a
+    # plain mean would leak quote-rounding noise straight into the forecast.
+    weighted = [(r['market_iv'], r['market_vega']) for r in rows
+                if r['tradeable'] and r['market_iv'] and r['market_vega']]
+    if weighted:
+        total = sum(w for _, w in weighted)
+        market_avg_iv = sum(iv * w for iv, w in weighted) / total if total else None
+    else:
+        valid = [r['market_iv'] for r in rows if r['market_iv']]
+        market_avg_iv = sum(valid) / len(valid) if valid else None
 
     # Pass 2: our forecast, then per-option fair value and edge.
     forecast, detail = blended_sigma(tick, ticks_total, week_vols,
@@ -214,7 +252,8 @@ def build_chain(securities, tick, ticks_total, week_vols, mode=None):
         row['iv_gap'] = None
         row['dispersion'] = None
 
-        if market_avg_iv and row['market_iv']:
+        # Dispersion is only meaningful where the quote actually pins the IV.
+        if market_avg_iv and row['market_iv'] and row['tradeable']:
             row['dispersion'] = row['market_iv'] - market_avg_iv
 
         if not forecast or t_years <= 0:
@@ -248,6 +287,7 @@ def build_chain(securities, tick, ticks_total, week_vols, mode=None):
 
     return {
         'spot': spot,
+        'live': live,
         'tick': tick,
         'ticks_total': ticks_total,
         't_years': t_years,
@@ -315,11 +355,20 @@ def hedge_suggestion(delta,
 
 
 def _mid(security):
-    """Midpoint of the quote. The case guarantees a live 2-cent two-sided
-    market, so the mid is the market maker's model price and is a far better
-    input than the last traded price, which can sit on either side or be
-    stale."""
+    """
+    Midpoint of the quote, or None if there is no live two-sided market.
+
+    The case guarantees a permanent 2-cent quote while a heat is running, so the
+    mid is the market maker's own model price - a far better input than the last
+    traded price, which can sit on either side of the spread or be stale.
+
+    Deliberately does NOT fall back to `last`. Observed on the practice server:
+    between heats the API reports bid=ask=0.0 while `last` still holds the
+    previous heat's settlement prices, and falling back produced confident,
+    entirely fictitious implied vols (RTM52C at 11.75%, a vega-weighted market
+    average of 6.30%). A missing quote must read as missing, not as cheap.
+    """
     bid, ask = security.get('bid'), security.get('ask')
     if bid and ask and bid > 0 and ask > 0:
         return (bid + ask) / 2.0
-    return security.get('last')
+    return None

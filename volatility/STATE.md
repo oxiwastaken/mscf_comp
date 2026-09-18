@@ -7,11 +7,12 @@ Work tracker for the RITCx Volatility Trading Case build.
 
 ## Topology phase
 
-`BUILT, UNTESTED AGAINST A LIVE SERVER.`
+`VERIFIED AGAINST A LIVE PRACTICE HEAT.` 99/99 offline tests pass.
 
-The engine is verified offline (87/87 unit tests). Nothing in this folder has
-yet touched the RIT practice server. That is the single largest open risk and
-the next thing that should happen.
+Read-path confirmed live on 17 Sep against a running heat: case, securities,
+news, implied vols, greeks, blend and hedge arithmetic all correct.
+**The order-submission path has still never been exercised** — every live test
+so far has been read-only or `--dry-run`.
 
 ---
 
@@ -94,6 +95,66 @@ three high-vol weeks — and it's worst at t=1 when the position is largest.
 
 ---
 
+## Live findings (17 Sep, practice server)
+
+Confirmed against a running heat: tickers are `RTM48C`…`RTM52P`, case length is
+**300 ticks** (the PDF *prose* was right, the sample news table was not),
+r = 0%, spread is exactly 2 cents on every option.
+
+**Put-call parity holds exactly** — at each strike the call and put solve to the
+identical IV (48C/48P both 24.75%, 50C/50P both 26.67%). Independent
+confirmation the IV solver and time-to-expiry are right.
+
+### Three real bugs, all found only by running live
+
+**1. The opening news release has a different format and was silently dropped.**
+At tick 1 the case says:
+
+> "The current risk free rate is 0%. RTM … its **current annualized realized
+> volatility is 28%**. This simulation consists of 20 trading days that are each
+> 15 ticks in length."
+
+It never says "this week", so the parser skipped it — losing week 1 entirely and
+shifting every later release into the wrong week. Now parsed explicitly, before
+the generic matcher (that same sentence contains "rate is 0%" and "15 ticks",
+which the generic patterns would happily misread as a volatility).
+
+Verified afterwards: weeks parse as 28% / 22% / 20%, and the tick-35 range
+(22.5% midpoint) correctly predicted the tick-74 exact value of 22% for week 2.
+
+Also confirms 20 days × 15 ticks = 300, so a week is 75 ticks — as assumed.
+
+**2. Implied-vol dispersion was mostly penny-rounding, not signal.**
+The 2-cent spread means wildly different things depending on vega. Measured live:
+
+| Option | Vega | IV noise from the 2¢ quote |
+|---|---|---|
+| RTM48C | 0.0319 | 0.63% |
+| RTM50C | 0.0126 | 1.10% |
+| RTM51C | 0.0035 | 2.63% |
+| RTM52C | 0.0006 | 4.08% |
+| RTM52P | 0.0006 | **17.54%** |
+
+Cross-strike dispersion read 3.62% — *smaller than the noise band of the options
+generating it*. The high-vega strikes clustered within 0.18%, i.e. the maker
+really does quote one flat IV, exactly as the case says. The `d` key would have
+sold RTM52C, a 2-cent option whose $2/contract fee is 100% of its premium.
+
+Fixed with `MAX_IV_SPREAD`: options whose quote width cannot pin IV to better
+than 1.5 vol points are excluded from trading, from dispersion, and from the
+market average. **The market average is now vega-weighted** — it was a plain
+mean, and in `market` mode it is the prior for unannounced weeks, so the noise
+was leaking directly into the forecast.
+
+**3. Dead quotes between heats produced confident fiction.**
+With the case `STOPPED`, the API returns `bid=ask=0.0` while `last` still holds
+the previous heat's settlement prices. `_mid()` fell back to `last` and invented
+a full IV surface — RTM52C at 11.75%, vega-weighted market average 6.30%.
+
+`_mid()` now returns `None` without a two-sided quote, `build_chain` reports a
+`live` flag, and both the dashboard and overlay refuse to show any signal or
+hedge while quotes are dead.
+
 ## Contradiction found in the official PDF
 
 The prose says 300 ticks with 75-tick weeks numbered from t=1. The sample news
@@ -120,6 +181,8 @@ Case length is read live from `ticks_per_period`, never hardcoded.
 | `news_parser.py` | Vol announcements → `{week: sigma}`. Permissive regex by design |
 | `vol_engine.py` | IV solve, greeks, integrated-variance blend, edges, hedging. Pure — sends nothing |
 | `dashboard.py` | Live console. Manual execute on keypress |
+| `overlay.py` | Always-on-top panel that floats over the RIT client. Display-only unless `--auto-hedge` |
+| `api_key.txt` | RIT API key. **Gitignored** — per-machine credential |
 | `record.py` | Read-only capture of a live heat → `heats/*.jsonl` |
 | `replay.py` | Scores every mode on identical recorded ticks |
 | `test_engine.py` | 87 offline checks, no server needed |
@@ -159,17 +222,26 @@ with `--manual-hedge` or the `a` key. `record.py` and `replay.py` are read-only.
 
 ## Next moves, in order
 
-1. **Smoke-test the dashboard against the practice server** —
-   `flserver.rotman.utoronto.ca:16590`, trader `jobe-2` / `exercise`.
-   Run `python dashboard.py --dry-run` first. Confirm tickers, case length, and
-   that news parses. *Nothing here has run against a live server yet.*
-2. **Record 3–4 practice heats** — `python record.py --name heat1`.
-3. **Settle the tail-week prior** — `python replay.py heats/*.jsonl`, then set
-   `TAIL_VOL_MODE` in `config.py`.
-4. **Tune `MIN_EDGE_DOLLARS` and order size** against replayed heats.
-5. Confirm the delta limit is ±7,000 on the day — the general RITC rules say it
-   can be announced by news instead. The dashboard reads and displays an
-   announced limit if one appears.
+1. ~~Smoke-test against the practice server~~ — **done 17 Sep.** Read path
+   verified; three bugs found and fixed (see Live findings).
+2. **Exercise the order path once, with tiny size.** Still completely untested.
+   Send a 1-lot manually and confirm the fill, the position update, and that the
+   delta recomputes. This is now the largest remaining risk.
+3. **Record 3–4 practice heats** — `python record.py --name heat1`.
+4. **Settle the tail-week prior** — `python replay.py heats/*.jsonl`, then set
+   `TAIL_VOL_MODE` in `config.py`. Still genuinely open.
+5. **Tune `MIN_EDGE_DOLLARS` and order size** against replayed heats.
+6. Confirm the delta limit is ±7,000 on the day — the general RITC rules say it
+   can be announced by news instead. Both UIs read and display an announced
+   limit if one appears.
+
+## Note on the observed edge
+
+At tick 160 of a live heat the blend read 23.14% against a market IV of 25.55%,
+i.e. the maker was pricing **2.4 vol points above** our forecast after the
+announced drop to 20% — options rich, sell signal, exactly the lag the case
+describes. Encouraging, but a single observation, and week 4 was still unknown
+(carried at the market prior). Do not over-read it.
 
 ## Open questions
 

@@ -27,7 +27,30 @@ python dashboard.py --dry-run        # confirm it connects and parses correctly
 the case length is what you expect, and the news is parsing, **before** trusting
 it with real orders.
 
+### API key
+
+The key is read from `RIT_API_KEY`, else from `api_key.txt` next to `config.py`,
+else Rotman's `Rotman` default. `api_key.txt` is **gitignored** — it's a
+per-machine credential and does not belong in the repo.
+
 ## During a heat
+
+Two front ends, same engine. Pick either, or run both.
+
+**Overlay** — floats on top of the RIT client so you read the analytics while
+trading in RIT's own BookTrader. Never takes keyboard focus, so your typing
+always goes to RIT. Drag by the title bar, right-click to close.
+
+```
+python overlay.py                    # display only
+python overlay.py --auto-hedge       # also manages delta (trades RTM only)
+python overlay.py --geometry +1200+700
+```
+
+RIT has no plugin API — its workspace format only accepts its own fixed window
+types — so this is as close to "inside RIT" as is possible.
+
+**Console dashboard** — fuller table, keyboard trading.
 
 ```
 python dashboard.py
@@ -55,10 +78,17 @@ out of that loop. Disable with `--manual-hedge` if you'd rather drive it.
 - `FAIR` — Black-Scholes price at our blended forecast.
 - `BUY_ED` / `SELL_ED` — edge **after** crossing the spread and paying
   commission. Positive means the trade makes money at the touch, not in theory.
-- `DISP` — this strike's IV minus the chain average. All ten options share one
-  expiry and one pricing model with no smile, so in equilibrium every `DISP`
-  should be zero. **Non-zero is the market maker's own inconsistency, and
-  capturing it doesn't require our forecast to be right.**
+- `DISP` — this strike's IV minus the (vega-weighted) chain average. All ten
+  options share one expiry and one pricing model with no smile, so in
+  equilibrium every `DISP` should be zero. Non-zero *can* be the market maker's
+  own inconsistency, which is capturable without our forecast being right — but
+  read the next line before trusting it.
+- `noisy ±x%` — the option's vega is too low for the 2-cent quote to pin its
+  implied vol to better than `MAX_IV_SPREAD`. These are excluded from trading,
+  from dispersion, and from the market average. Measured live, two cents was
+  worth 0.63 vol points on RTM48C but **17.5 vol points** on RTM52P, and the
+  apparent cross-strike dispersion was entirely this artefact. At $2/contract,
+  a 2-cent option also pays 100% of its premium in commission.
 
 ## Choosing the tail-week prior
 

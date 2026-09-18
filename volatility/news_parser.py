@@ -32,8 +32,38 @@ _THIS_WEEK_RE = re.compile(r'\bthis\s+week\b', re.IGNORECASE)
 _NEXT_WEEK_RE = re.compile(r'\bnext\s+week\b', re.IGNORECASE)
 _VOL_RE = re.compile(r'volatilit', re.IGNORECASE)
 
+# The opening release does not use the words "this week". Observed live on the
+# practice server at tick 1:
+#   "The current risk free rate is 0%. RTM is an ETF that mimics one of the
+#    major indices ... its current annualized realized volatility is 28%. This
+#    simulation consists of 20 trading days that are each 15 ticks in length."
+# That 28% IS week one's volatility, and without this pattern it is dropped -
+# which also shifts every later "this week" release into the wrong week.
+_CURRENT_VOL_RE = re.compile(
+    r'current(?:ly)?\s+(?:annualized\s+)?(?:realized\s+)?volatilit\w*\s*'
+    r'(?:of\s+\w+\s*)?(?:is|of|at)?\s*(\d+(?:\.\d+)?)\s*%', re.IGNORECASE)
+
+_RISK_FREE_RE = re.compile(
+    r'risk[\s-]*free\s+rate\s+(?:is|of|at)\s*(\d+(?:\.\d+)?)\s*%', re.IGNORECASE)
+
 _DELTA_LIMIT_RE = re.compile(
     r'delta\s+limit[^0-9]{0,30}([0-9][0-9,]*)', re.IGNORECASE)
+
+
+def parse_risk_free_rate(news_items):
+    """
+    Read the risk-free rate out of the opening release, as a decimal.
+
+    The case PDF says the start-up model assumes 0% but "your instructor may
+    change this assumption", and the live opening news states it explicitly, so
+    read it rather than trusting the default.
+    """
+    for item in news_items:
+        text = f"{item.get('headline', '')} {item.get('body', '')}"
+        match = _RISK_FREE_RE.search(text)
+        if match:
+            return float(match.group(1)) / 100.0
+    return None
 
 
 def week_of_tick(tick, ticks_total, weeks=config.WEEKS_IN_CASE):
@@ -105,7 +135,28 @@ def parse_vol_news(news_items, ticks_total):
         tick = item.get('tick', 0)
         this_week = bool(_THIS_WEEK_RE.search(text))
         next_week = bool(_NEXT_WEEK_RE.search(text))
+
         if not (this_week or next_week):
+            # The opening release states week one's volatility without saying
+            # "this week". Handle it explicitly and BEFORE the generic point
+            # matcher, because that release also contains "risk free rate is
+            # 0%" and "15 ticks", which the generic patterns would happily
+            # misread as a volatility.
+            opening = _CURRENT_VOL_RE.search(text)
+            if not opening or current_week:
+                continue
+            sigma = float(opening.group(1)) / 100.0
+            if not config.IV_MIN <= sigma <= config.IV_MAX:
+                continue
+            current_week = 1
+            exact_weeks.add(1)
+            week_vols[1] = sigma
+            observations.append({
+                'tick': tick, 'week': 1,
+                'tick_week': week_of_tick(tick, ticks_total),
+                'sigma': sigma, 'kind': 'point', 'lo': None, 'hi': None,
+                'exact': True, 'text': text,
+            })
             continue
 
         # The first release seen anchors the counter using tick arithmetic;
