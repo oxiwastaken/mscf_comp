@@ -900,8 +900,155 @@ the whole pre-hedge delta at every resize, which is exactly what Change 1
 stopped doing. **The live number is the one to trust, and it is what the current
 live run is for.**
 
+## 18 Sep, evening — what the LIVE run taught us that no backtest could
+
+Three findings, in order of how much they change the picture.
+
+### 1. The backtest is 1.46x optimistic. This is the big one.
+
+`python sweep.py --validate` over **91 matched heats** (live results.csv against
+the recording of the same heat):
+
+```
+live mean        $109,017
+backtest mean    $159,487
+ratio                1.46x
+correlation          0.89
+```
+
+It RANKS heats well and is biased high. **Every offline delta in this document
+is in backtest currency and translates to roughly 0.68x in real money.** A
++$6,000 backtest improvement is about +$4,100 live.
+
+It also means $150k live needs about $219k in backtest terms, which is far
+beyond anything measured. Decide the target against live numbers, not these.
+
+Where the gap goes, measured on the same twelve heats:
+
+```
+backtest (atomic fills, modelled penalty)         $137,810
+replay_trader.py (real trader, order-accurate)    $127,725
+  ... minus the measured live penalty (~$6,600)   ~$121,100
+live, current build                                ~$99,505
+```
+
+So the trader's own order sequencing costs ~$10k against the backtest's
+idealisation, the delta penalty ~$6.6k, and **~$20k is still unexplained.**
+The open hypothesis is execution TIME: a full-size resize of the structure is
+25+ option orders at the 100-contract cap plus hedges between them, each an
+HTTP round trip, against a one-second tick. `timing_from_log.py` was written to
+measure this from the trader's own timestamps and has NOT yet been run over a
+full heat. **That is the first thing to do.**
+
+### 2. The real delta penalty is half what the backtest charges
+
+The backtest charges one second of the whole pre-hedge delta at every resize -
+a model of exactly the behaviour interleaved hedging removed. Read off the live
+logs with `penalty_from_log.py`:
+
+```
+17:47 heat   29 ticks outside the band   worst $2,171/s   ~$11,664
+17:54 heat   16 ticks                    worst   $531/s    ~$3,332
+18:01 heat   19 ticks                    worst   $765/s    ~$4,844
+```
+
+Mean ~$6,600 against the backtest's $14,839.
+
+### 3. The variance is the case, not the model — and the worst heats are fine
+
+`tail_study.py`, 133 recordings. The 13 worst heats against the 13 best:
+
+| | P&L | penalty | friction | contracts | flips | flat |
+|---|---|---|---|---|---|---|
+| worst | $13,158 | $17,703 | $48,706 | ~21k | 0.0 | 29% |
+| best | $277,853 | $14,360 | $50,836 | ~22k | 0.2 | 27% |
+
+**Operationally identical.** Same costs, same turnover, same engagement, no
+flip-flopping. The difference is whether the maker mispriced vol that day.
+There is no failure mode in the bad heats to fix.
+
+Also worth keeping in view: **4 losing heats out of 133**, worst -$40,716. The
+spread is mostly upside dispersion, not downside risk. Per-heat sd is ~$60k
+without the structure and ~$74k with it; the ten-heat average - which is what
+the competition scores - has sd of roughly $19k and $23k respectively.
+
+Every configuration ever tested lands within $5k of the same sd, including
+"always max size" ($58,463) and "conviction only" ($59,427) against a base of
+$58,854. Maximum aggression and minimum engagement produce the same spread.
+
+### The process failure, and the guard that now prevents it
+
+`overnight.py` spawns a FRESH trader per heat, so it trades whatever is on disk
+when the heat starts. Editing the model while the loop was live put three
+unvalidated builds into the market, one of which had a bug measured minutes
+later at -$19,941 a heat. It returned **-$35,777 live**.
+
+`overnight.py` now refuses to start, and refuses to spawn each subsequent heat,
+while any of the six modules the trader loads has uncommitted edits. It logs
+the commit it is trading. **Trade a commit, not a working directory.**
+
+### Ideas measured and rejected this evening
+
+| idea | result |
+|---|---|
+| taper position by sqrt(T) to cut gamma | -$20,536 (t -7.2) |
+| tighter hedge band 3000/1000 | -$1,312 |
+| gate on extra gamma carried, best of six | +$446 (t 1.2) |
+| stand structure down at 0.60 of the heat | +$3,314 (t 3.0) — **not shipped** |
+
+The last one is the interesting rejection. The surface is not smooth (0.50 is
+-$2,599, 0.55 is +$2,556), the tick it prefers sits on the week-3 news
+boundary, and the principled version of the same idea - gating on the gamma
+actually added - is worth $446. That is calendar fitting, so it stays out.
+
+The general result: the ~$15k of penalty is the price of carrying the vega.
+Every way of shrinking the position to avoid it costs more than it saves.
+
+## HOW TO KEEP TESTING WITHOUT ME (18 Sep)
+
+Everything below writes its results to a file, so an unattended run is not
+lost. Nothing here sends an order except `overnight.py`.
+
+```
+cd volatility
+python overnight.py                    # trade + record every heat
+                                       #   -> results.csv, logs/, heats/
+python overnight.py --summary          # what has been earned so far
+python overnight.py --dry-run          # record only, never trades
+```
+
+The runner refuses to start if the trader's own code has uncommitted edits.
+That is deliberate - see the process failure above. Commit first.
+
+Offline analysis, all safe to run while trading (none of them import into the
+live path). Redirect the output, because these print and do not save:
+
+```
+cd volatility
+python test_engine.py                       # 180 offline checks
+python replay_trader.py > ../out_replay.txt # real trader, order-accurate, P&L
+python penalty_from_log.py logs/auto_*.log  # what the delta penalty REALLY cost
+python timing_from_log.py logs/auto_*.log   # how long a resize takes vs a tick
+python sweep.py --validate                  # backtest against live, same heats
+
+cd ../volatility_research                   # results/ is written automatically
+python ship_or_not.py | tee results/ship.txt   # is the structure worth it?
+python tail_study.py  | tee results/tail.txt   # what the worst heats look like
+python guard_check.py | tee results/guard.txt  # the structure's safety gates
+python gamma_check.py | tee results/gamma.txt  # late-heat gamma mitigations
+```
+
+**The most valuable unattended thing is simply more heats.** Every conclusion
+here is limited by sample size: 4 clean live heats on the current build against
+a $60k per-heat spread. `overnight.py` left running overnight turns that into
+something that can actually settle the 1.46x question.
+
 ## Next moves, in order
 
+0. **Run `timing_from_log.py` over a full heat.** The single largest unexplained
+   number is the ~$20k a heat between the order-accurate replay and live. If
+   resizes routinely overrun a one-second tick, that is where it is going, and
+   it would argue for a smaller structure - fewer contracts is fewer orders.
 1. ~~Smoke-test against the practice server~~ — **done 17 Sep.** Read path
    verified; three bugs found and fixed (see Live findings).
 2. **Exercise the order path once, with tiny size.** Still completely untested.

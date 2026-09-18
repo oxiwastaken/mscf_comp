@@ -44,6 +44,9 @@ class ReplayClient:
         self.positions = {}
         self.orders = []
         self.breaches = []
+        self.cash = 0.0
+        self.contracts = 0
+        self.shares = 0
 
     # ------------------------------------------------------------- the feed
     def case(self):
@@ -64,6 +67,17 @@ class ReplayClient:
                  'net_limit': config.LIMIT_OPT_NET}]
 
     # ---------------------------------------------------------- the fills
+    def fill_price(self, ticker, action):
+        """What this order crosses at, from the tick the trader is acting on."""
+        for sec in self.snapshots[self.index]['securities']:
+            if sec['ticker'].upper() != ticker:
+                continue
+            bid, ask = sec.get('bid'), sec.get('ask')
+            if not bid or not ask:
+                return None
+            return ask if action == 'BUY' else bid
+        return None
+
     def send_in_chunks(self, ticker, action, quantity, max_chunk):
         """
         Fill the order the way the real client sends it: split into legal
@@ -74,6 +88,7 @@ class ReplayClient:
         enforced per submitted order, so the intermediate states are real.
         """
         ticker = ticker.upper()
+        price = self.fill_price(ticker, action)
         cap = (config.MAX_TRADE_RTM if ticker == config.UNDERLYING
                else config.MAX_TRADE_OPTIONS)
         step = min(int(max_chunk), cap)
@@ -84,8 +99,42 @@ class ReplayClient:
             signed = lot if action == 'BUY' else -lot
             self.positions[ticker] = self.positions.get(ticker, 0) + signed
             self.orders.append((ticker, action, lot))
+            if price is not None:
+                # Cash out, position in - the same accounting the backtest
+                # uses, so the two numbers are comparable.
+                if ticker == config.UNDERLYING:
+                    self.cash -= signed * price + lot * 0.01
+                    self.shares += lot
+                else:
+                    self.cash -= (signed * price * config.CONTRACT_MULTIPLIER
+                                  + lot * 1.00)
+                    self.contracts += lot
             self.check()
         return []
+
+    def settle(self):
+        """Cash-settle everything at the last recorded price."""
+        spot = None
+        for sec in self.snapshots[-1]['securities']:
+            if sec['ticker'].upper() == config.UNDERLYING:
+                spot = sec.get('last') or sec.get('bid')
+        if not spot:
+            return self.cash
+        total = self.cash
+        for ticker, position in self.positions.items():
+            if not position:
+                continue
+            if ticker == config.UNDERLYING:
+                total += position * spot
+                continue
+            parsed = vol_engine.parse_option_ticker(ticker)
+            if not parsed:
+                continue
+            flag, strike = parsed
+            intrinsic = (max(0.0, spot - strike) if flag == 'c'
+                         else max(0.0, strike - spot))
+            total += position * intrinsic * config.CONTRACT_MULTIPLIER
+        return total
 
     def check(self):
         """Both option limits and the share limit, after every single order."""
@@ -128,7 +177,8 @@ def replay(path, verbose=False):
         peak_delta = max(peak_delta, abs(chain['portfolio_delta']))
         peak_shares = max(peak_shares,
                           abs(client.positions.get(config.UNDERLYING, 0)))
-    return client.breaches, client.orders, peak_delta, peak_shares
+    return (client.breaches, client.orders, peak_delta, peak_shares,
+            client.settle(), client.contracts, client.shares)
 
 
 def main():
@@ -155,17 +205,27 @@ def main():
 
     print(f'\n  replaying the live trader through {len(files)} heats\n')
     failed = 0
+    pnls = []
     for path in files:
-        breaches, orders, peak_delta, peak_shares = replay(path, args.verbose)
+        (breaches, orders, peak_delta, peak_shares,
+         pnl, contracts, shares) = replay(path, args.verbose)
         name = os.path.basename(path)
         status = 'OK  ' if not breaches else 'FAIL'
-        print(f'  {status} {name:<34} {len(orders):>5,} orders   '
+        pnls.append((name, pnl))
+        print(f'  {status} {name:<30} P&L ${pnl:>10,.0f}   '
+              f'{contracts:>6,} contracts  {shares:>7,} shares   '
               f'peak delta {peak_delta:>8,.0f}   peak RTM {peak_shares:>7,.0f}')
         for breach in breaches[:3]:
             print(f'         {breach}')
         failed += bool(breaches)
 
-    print(f'\n  {len(files) - failed}/{len(files)} heats clean\n')
+    if pnls:
+        import statistics
+        values = [value for _name, value in pnls]
+        print(f'\n  mean P&L ${statistics.mean(values):>11,.0f}   '
+              f'median ${statistics.median(values):>11,.0f}   '
+              f'worst ${min(values):>11,.0f}')
+    print(f'  {len(files) - failed}/{len(files)} heats clean\n')
     return 1 if failed else 0
 
 
