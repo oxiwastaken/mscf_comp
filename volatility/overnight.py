@@ -141,7 +141,47 @@ def summary():
     return 0
 
 
-def run(dry_run=False):
+def build_id():
+    """The commit being traded, and whether the tree has been edited since."""
+    def git(*args):
+        try:
+            return subprocess.check_output(('git',) + args, cwd=HERE,
+                                           text=True, stderr=subprocess.DEVNULL).strip()
+        except Exception:
+            return ''
+    return git('rev-parse', '--short', 'HEAD'), git('status', '--porcelain')
+
+
+def check_build(allow_dirty=False):
+    """
+    Refuse to trade a working tree that is being edited.
+
+    This is not hygiene, it is a loss that already happened. Every heat gets a
+    FRESH autotrader process, so the loop picks up whatever is on disk at the
+    moment the heat starts - including a half-finished edit. On 18 Sep three
+    heats ran mid-edit builds and one of them ran a version whose bug was found
+    minutes later and measured at -$19,941 a heat in backtest. It returned
+    -$35,777 live.
+
+    Trade a commit, not a working directory.
+    """
+    commit, dirty = build_id()
+    if dirty and not allow_dirty:
+        log('REFUSING TO TRADE: the working tree has uncommitted changes.')
+        log('Every heat starts a fresh trader, so an edit mid-run goes live')
+        log('on the next heat. Commit or stash first, then restart:')
+        for line in dirty.splitlines()[:10]:
+            log(f'    {line}')
+        log('(pass --allow-dirty to override, deliberately)')
+        return None
+    return commit or 'unknown'
+
+
+def run(dry_run=False, allow_dirty=False):
+    commit = check_build(allow_dirty)
+    if commit is None:
+        return 1
+    log(f'trading build {commit}')
     os.makedirs(LOGS, exist_ok=True)
     os.makedirs(HEATS, exist_ok=True)
     client = RitClient()
@@ -241,13 +281,15 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--dry-run', action='store_true',
                         help='supervise and record but never send orders')
+    parser.add_argument('--allow-dirty', action='store_true',
+                        help='trade an edited working tree (deliberately)')
     parser.add_argument('--summary', action='store_true',
                         help='print accumulated results and exit')
     args = parser.parse_args()
 
     if args.summary:
         return summary()
-    return run(dry_run=args.dry_run)
+    return run(dry_run=args.dry_run, allow_dirty=args.allow_dirty)
 
 
 if __name__ == '__main__':
