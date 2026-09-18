@@ -73,6 +73,20 @@ class Book:
         self.penalty = 0.0
         self.contracts = 0
         self.shares = 0
+        # Mark-to-market NLV per tick, as [(tick, nlv)]. Cash alone is not
+        # comparable to the live recordings mid-heat, because the value of an
+        # open position is not in it - and the whole point of a per-phase
+        # breakdown is to compare the two.
+        self.curve = []
+
+    def mark(self, tick, rows, spot):
+        """Record cash plus the marked value of everything currently open."""
+        value = self.positions.get(config.UNDERLYING, 0) * (spot or 0.0)
+        for row in rows:
+            held = self.positions.get(row['ticker'], 0)
+            if held and row.get('mid'):
+                value += held * row['mid'] * config.CONTRACT_MULTIPLIER
+        self.curve.append((tick, self.cash + value))
 
     def trade_option(self, row, change):
         if change == 0:
@@ -285,6 +299,8 @@ def run(snapshots, policy, verbose=False, forecast_news=None,
             charge = breach * config.DELTA_PENALTY_RATE
             book.cash -= charge
             book.penalty += charge
+
+        book.mark(tick, chain['rows'], spot)
 
     book.settle(last_spot or 0)
     return book, news_pnl_marks
