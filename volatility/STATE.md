@@ -316,9 +316,17 @@ one-tick lag.
 | 6 | +$81,126 | $21,696 | 8,952 | 189,576 | **+ news-gated** |
 | 7 | +$95,650 | **$15,397** | **5,092** | 260,639 | news-gated |
 | 8 | **+$162,011** | $20,487 | 8,036 | 220,762 | news-gated |
+| 9 | +$33,437 | $16,290 | 5,984 | 216,120 | news-gated |
 
-Mean of the seven since the hedge fix: **+$88,290**.
-Mean of the three news-gated heats: **+$112,929**.
+Mean of the eight since the hedge fix: **+$81,469**.
+Mean of the four news-gated heats: **+$93,056**.
+
+**Variance between heats is enormous and is the dominant fact here.** Heats 8
+and 9 ran byte-identical code back to back and returned +$162,011 and +$33,437 —
+a 5x spread driven purely by how badly the maker mispriced vol that day. Any
+conclusion drawn from a single heat is noise. This is why `backtest.py`
+same-heat comparison is the only valid way to evaluate a change, and why the
+competition target is framed as a 10-heat average.
 
 Progression: heat 1→2 was the stale-delta hedge fix plus recalibrated sizing.
 2→3 was anti-churn (option churn −60%, friction −57%). 5→6 was news-gating,
