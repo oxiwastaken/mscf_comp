@@ -141,15 +141,23 @@ def summary():
     return 0
 
 
+# The modules the live trader actually loads. Only edits to THESE can change
+# what trades, so only these stop the runner - an untracked analysis script or
+# a note in STATE.md is not a reason to sit out a heat.
+LIVE_PATH = ('autotrader.py', 'structure.py', 'vol_engine.py',
+             'news_parser.py', 'config.py', 'rit_api.py')
+
+
 def build_id():
-    """The commit being traded, and whether the tree has been edited since."""
+    """The commit being traded, and whether the live path has been edited."""
     def git(*args):
         try:
             return subprocess.check_output(('git',) + args, cwd=HERE,
                                            text=True, stderr=subprocess.DEVNULL).strip()
         except Exception:
             return ''
-    return git('rev-parse', '--short', 'HEAD'), git('status', '--porcelain')
+    dirty = git('status', '--porcelain', '--', *LIVE_PATH)
+    return git('rev-parse', '--short', 'HEAD'), dirty
 
 
 def check_build(allow_dirty=False):
@@ -167,7 +175,7 @@ def check_build(allow_dirty=False):
     """
     commit, dirty = build_id()
     if dirty and not allow_dirty:
-        log('REFUSING TO TRADE: the working tree has uncommitted changes.')
+        log('REFUSING TO TRADE: the trader\'s own code has uncommitted edits.')
         log('Every heat starts a fresh trader, so an edit mid-run goes live')
         log('on the next heat. Commit or stash first, then restart:')
         for line in dirty.splitlines()[:10]:
