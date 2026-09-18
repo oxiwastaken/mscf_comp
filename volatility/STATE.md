@@ -318,9 +318,10 @@ one-tick lag.
 | 8 | **+$162,011** | $20,487 | 8,036 | 220,762 | news-gated |
 | 9 | +$33,437 | $16,290 | 5,984 | 216,120 | news-gated |
 | 11 | +$60,938 | $15,577 | 6,812 | **97,640** | news-gated |
+| 12 | +$93,248 | **$13,777** | **4,888** | 200,062 | news-gated |
 
-Mean of the nine since the hedge fix: **+$79,144**.
-Mean of the five news-gated heats: **+$86,632**.
+Mean of the ten since the hedge fix: **+$80,552**.
+Mean of the six news-gated heats: **+$87,735**.
 
 (Heat 10 excluded — see below.)
 
