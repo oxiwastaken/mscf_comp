@@ -44,22 +44,50 @@ from replay import load, spot_of
 #   raising the deadband so small target moves are ignored, versus
 #   refusing to resize at all until new information arrives.
 POLICIES = (
-    'continuous',        # today's behaviour, 25% deadband
+    'continuous',        # re-evaluate the target every tick, 25% deadband
     'deadband-40',
     'deadband-60',
     'deadband-80',
-    'news',              # resize only on a news release
+    'news',              # resize only on a news release - shipped behaviour
     'news+band',         # ... and hedge less often too
+    'ratchet',           # add on conviction, never trim into convergence
+    'ratchet+news',      # ratchet, but only act when news lands
 )
 
 
 def policy_params(policy):
-    """(rebalance fraction, news-gated?) for a policy name."""
+    """(rebalance fraction, news-gated?, ratchet?) for a policy name."""
     if policy.startswith('deadband-'):
-        return int(policy.split('-')[1]) / 100.0, False
+        return int(policy.split('-')[1]) / 100.0, False, False
+    if policy == 'ratchet':
+        return at.REBALANCE_FRACTION, False, True
+    if policy == 'ratchet+news':
+        return at.REBALANCE_FRACTION, True, True
     if policy.startswith('news'):
-        return at.REBALANCE_FRACTION, True
-    return at.REBALANCE_FRACTION, False
+        return at.REBALANCE_FRACTION, True, False
+    return at.REBALANCE_FRACTION, False, False
+
+
+def ratchet_target(target, held):
+    """
+    Never trim a winning position just because the gap has closed.
+
+    Size is proportional to |gap|, and between news releases the gap shrinks for
+    one reason only: the maker is converging toward our forecast. That is the
+    trade WORKING. Re-sizing on it sells out of the convergence that pays us,
+    which is why plain continuous rebalancing loses to news-gating even though
+    it reacts faster.
+
+    So the gap sets a FLOOR on conviction, not a target. Add when it widens,
+    hold when it narrows, and leave only when the edge is actually gone - the
+    gap through the exit threshold, or reversed, both of which arrive as
+    target 0 or a target of the opposite sign.
+    """
+    if target == 0 or held == 0:
+        return target
+    if (target > 0) != (held > 0):
+        return target                      # view flipped - act on it
+    return target if abs(target) > abs(held) else int(held)
 
 
 class Book:
@@ -78,6 +106,9 @@ class Book:
         # open position is not in it - and the whole point of a per-phase
         # breakdown is to compare the two.
         self.curve = []
+        # Straddle size held each tick, so studies can ask what we were holding
+        # when the maker moved rather than only what we ended up with.
+        self.sizes = []
 
     def mark(self, tick, rows, spot):
         """Record cash plus the marked value of everything currently open."""
@@ -87,6 +118,8 @@ class Book:
             if held and row.get('mid'):
                 value += held * row['mid'] * config.CONTRACT_MULTIPLIER
         self.curve.append((tick, self.cash + value))
+        net = sum(q for t, q in self.positions.items() if t != config.UNDERLYING)
+        self.sizes.append((tick, net / 2.0))
 
     def trade_option(self, row, change):
         if change == 0:
@@ -141,10 +174,11 @@ def run(snapshots, policy, verbose=False, forecast_news=None,
     forecast as being worse than no forecast at all. News-gating fires on the
     feed's length changing, so freezing the feed froze the position too.
     """
-    rebalance_fraction, news_gated = policy_params(policy)
+    rebalance_fraction, news_gated, ratchet = policy_params(policy)
     ticks_total = snapshots[0]['case'].get('ticks_per_period') or 300
     book = Book()
     gap_ema = None
+    iv_history = []
     target_strike = None
     last_news = -1
     last_spot = None
@@ -188,7 +222,14 @@ def run(snapshots, policy, verbose=False, forecast_news=None,
         raw_gap = forecast - chain['market_avg_iv']
         gap_ema = raw_gap if gap_ema is None else (
             at.GAP_SMOOTHING * raw_gap + (1 - at.GAP_SMOOTHING) * gap_ema)
-        gap = gap_ema
+        # The maker's own recent drift, added to the signal. It converges
+        # slowly and in a straight line, so how fast it is moving predicts
+        # where it will be - information the gap alone does not carry.
+        iv_history.append(chain['market_avg_iv'])
+        momentum = 0.0
+        if at.MOMENTUM_WEIGHT and len(iv_history) > at.MOMENTUM_TICKS:
+            momentum = iv_history[-1] - iv_history[-at.MOMENTUM_TICKS - 1]
+        gap = gap_ema + at.MOMENTUM_WEIGHT * momentum
 
         if len(news) != last_news:
             last_news = len(news)
@@ -232,6 +273,12 @@ def run(snapshots, policy, verbose=False, forecast_news=None,
                 target = -target
 
         # ------------------------------------------------- rebalance policy
+        if ratchet and target is not None:
+            # The gap sets a floor on conviction, not a target. See
+            # ratchet_target: trimming into a narrowing gap is selling out of
+            # the convergence that pays us.
+            legs = book.positions.get(call['ticker'], 0)
+            target = ratchet_target(target, legs)
         may_trade = (not news_gated) or pending_resize or target == 0
         if target is not None and may_trade:
             # close anything at other strikes first (limit headroom)

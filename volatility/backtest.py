@@ -206,6 +206,13 @@ def run(snapshots, policy, verbose=False):
             if gap < 0:
                 target = -target
 
+        # The trader lets the gap set a floor on conviction rather than a
+        # target, so the backtest must too or it measures a strategy we do not
+        # run. See autotrader.ratchet_target.
+        if target is not None:
+            target = at.ratchet_target(
+                target, int(book.positions.get(call['ticker'], 0)))
+
         # ------------------------------------------------- rebalance policy
         may_trade = (not news_gated) or pending_resize or target == 0
         if target is not None and may_trade:

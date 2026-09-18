@@ -452,6 +452,21 @@ check('strikes being left are closed before the new one is opened',
 # resize: the penalty accrues per second, and a full resize is ten chunked
 # option orders. Replaying the order stream reconstructs what the book actually
 # carried between chunks.
+print('\nratchet sizing')
+check('a wider gap adds to the position',
+      autotrader.ratchet_target(400, 300) == 400)
+check('a narrowing gap does NOT trim the position',
+      autotrader.ratchet_target(200, 400) == 400,
+      f'got {autotrader.ratchet_target(200, 400)}')
+check('exiting is always allowed', autotrader.ratchet_target(0, 400) == 0)
+check('a flipped view is acted on immediately',
+      autotrader.ratchet_target(-300, 400) == -300)
+check('the same logic holds short', autotrader.ratchet_target(-400, -300) == -400)
+check('a narrowing gap does not trim a short either',
+      autotrader.ratchet_target(-200, -400) == -400)
+check('opening from flat uses the target',
+      autotrader.ratchet_target(350, 0) == 350)
+
 print('\ninterleaved hedging')
 
 

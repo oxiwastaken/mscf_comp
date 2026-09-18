@@ -116,6 +116,27 @@ REBALANCE_FRACTION = 0.25
 # filter reaches ~80% of a step in about ten ticks - far quicker than the maker
 # converges, so no edge is given up.
 GAP_SMOOTHING = 0.15
+# How much of the maker's own recent drift to add to the signal.
+#
+# Measured over 30,932 tick observations from 108 recorded heats
+# (`signal_study.py`), correlation with the maker's realised move over the next
+# ten ticks:
+#
+#     raw gap (forecast - market IV)     0.031
+#     EMA gap 0.15, what we trade        0.124
+#     quote momentum, last 10 ticks      0.271     <- best single predictor
+#
+# The maker closes only about 4% of the gap every ten ticks, so it converges
+# slowly and in a straight line - which is exactly why its recent drift predicts
+# its next drift. That information is orthogonal to the gap: the gap says where
+# the quote must end up, momentum says how fast it is getting there.
+#
+# Note the same study killed the idea that smoothing is a lag worth removing.
+# In the ticks right after a release the EMA predicts far BETTER than the raw
+# gap (0.766 against 0.601), because that is where the cent-rounding noise is
+# worst relative to the signal.
+MOMENTUM_TICKS = 10
+MOMENTUM_WEIGHT = 0.0
 # Resize the option position only when NEW INFORMATION arrives.
 #
 # Between news releases the straddle is left completely alone. Backtested over

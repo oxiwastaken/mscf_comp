@@ -739,11 +739,85 @@ captured 94% of the ceiling was wrong — that oracle was handed the shipped
 configuration's handicaps, so it measured the ceiling of the config, not of the
 structure.
 
-**Fix.** Build a faster signal and let it trade continuously.
+**DONE 18 Sep. Outcome: +$1,815 a heat, not the ~$22,000 hoped for.** The
+premise was half right — the capture rate really is worse between releases —
+but every way of trading more between them loses money. What worked was
+changing *how size responds*, not *when we act*.
 
-**Risk.** Real. Turning news-gating off with today's noisy signal is *worse*,
-which is exactly why it is on. This must be proven on the 95 recordings before
-it goes near a live heat.
+**Shipped: ratchet sizing.** Size is proportional to the gap, and between news
+releases the gap shrinks for one reason only — the maker converging toward our
+forecast, i.e. the trade working. Re-sizing on that sells out of the very
+convergence that pays us. The gap now sets a **floor** on conviction: add when
+it widens, hold when it narrows, leave only when the edge is gone or reversed.
+**+$1,815 a heat, paired t = 3.2**, confirmed independently in both backtests.
+
+### Everything else tested and rejected
+
+| idea | result |
+|---|---|
+| continuous rebalancing | −$4,059 (t −1.9) |
+| deadband 40 / 60 | −$4,887 / −$7,293 |
+| momentum added to the signal, weight 0.25 | −$8,745 (t −3.9) |
+| momentum under ratchet, weight 0.25 | −$8,702 (t −3.8) |
+| exit threshold 0.001 / 0.0 (stay in longer) | −$2,175 / −$3,662 |
+| carry into expiry | −$5,516 |
+
+**The momentum result is the instructive one.** Over 30,932 tick observations,
+the maker's own recent drift is by far the best predictor of its next move —
+correlation **0.271**, against **0.124** for the EMA gap we actually trade and
+0.031 for the raw gap. It still loses money, and the reason is structural:
+momentum rises as the maker converges toward our forecast, so it says "add"
+exactly when the *remaining* edge is smallest. **Correlation with the next move
+is not the same as profitability.**
+
+The same study killed the idea that smoothing is a lag worth removing: in the
+ticks right after a release the EMA predicts far better than the raw gap (0.766
+against 0.601), because that is where cent-rounding noise is worst.
+
+### Why there is so little left — size was never the constraint
+
+`sizing_study.py`, over 108 heats:
+
+```
+ticks at the full contract limit      60.9%
+ticks holding anything                71.1%   -> 86% of in-market ticks are maxed
+ticks the sign was right              84.2%
+sign right when the move was big      86.7%
+```
+
+**We are already pinned at the 1,000-contract limit whenever we hold anything.**
+So any "better signal" that merely rescales the gap changes nothing — which is
+why the sizing ramp (a sign/threshold change) was worth $19,554 and momentum (a
+magnitude change) was worth nothing. Only the *sign* can be improved, and it is
+already right 84% of the time.
+
+Nor is the 28.9% of ticks spent flat a mistake: every variant that stayed in
+longer lost money. Those ticks genuinely have no edge.
+
+### What $150k would actually require
+
+`reachable.py` blends our forecast toward a perfect 10-tick view of the maker's
+next move and reads P&L off the curve:
+
+| blend | sign right | mean P&L |
+|---|---|---|
+| 0.00 (today) | 69.5% | $128,515 |
+| 0.20 | 74.7% | $137,094 |
+| 0.35 | 78.6% | $141,126 |
+| **0.50** | **81.8%** | **$144,877** |
+| 0.75 | 87.7% | $139,830 |
+| 1.00 | 100.0% | $135,315 |
+
+Two things worth keeping. **P&L peaks at a 50/50 blend and falls with perfect
+foresight** — a pure 10-tick predictor flips the position too often, and our
+forecast supplies the stability; the best signal is both. And **even a 50%
+perfect signal only reaches $144,877**, short of $150k, on a policy that also
+gets the ratchet.
+
+So **$150,000 a heat is not reachable through the signal.** Half of a literally
+perfect short-horizon forecast does not get there. The remaining routes are the
+residual delta transient (~$3,700 a heat, Change 1 leftovers) and structural
+ideas not yet found.
 
 ### How results get tracked
 
