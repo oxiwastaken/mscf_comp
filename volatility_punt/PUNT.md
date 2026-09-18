@@ -94,6 +94,55 @@ vega, and needs about 2 vol points of convergence just to break even on the
 extra fees; at the 0.93 ratio seen early in a live heat it needs ~10 points.
 Observed gaps are 1–5.
 
+## Alternative P&L engines tested 18 Sep — all three dead
+
+The oracle above measures the ceiling of *this structure*. These were attempts
+at a materially different one.
+
+**1. Gamma scalping (`sweep.py`, tight hedge bands).** A delta-hedged straddle
+earns the integral of gamma against realised-minus-implied variance, which pays
+whether or not the maker's quote ever moves - and our lazy 5,000-delta band
+forgoes it deliberately. Tightening the band loses money monotonically:
+
+| hedge band | mean | vs current |
+|---|---|---|
+| current (5,000 -> 2,000) | $132,377 | — |
+| 3,000 -> 500 | $123,224 | −$9,153 (t −5.9) |
+| 1,500 -> 0 | $120,617 | −$11,760 (t −6.7) |
+| flat every tick | $118,781 | −$13,596 (t −7.7) |
+
+The case states the maker prices at a **zero variance risk premium**, so
+realised volatility equals implied in expectation and there is no gamma edge to
+harvest — only the hedging cost of trying. This is not a tuning result; it
+follows from how the case is built.
+
+**2. The wings are underpriced (`smile.py`).** Hypothesis: three of four weekly
+vols are unannounced and genuinely random, so integrated variance is a random
+variable; mixing lognormals fattens the tails, and a flat surface should
+therefore underprice OTM options. Measured by buying one contract of every
+strike at tick 20 and holding to cash settlement, over 95 heats:
+
+| moneyness | mean P&L | return | t |
+|---|---|---|---|
+| ATM | −$58 | −41.0% | −6.4 |
+| 1 OTM | −$51 | −52.3% | −7.1 |
+| 2 OTM | −$41 | −65.1% | −7.6 |
+| 3 OTM | −$53 | −79.7% | −7.4 |
+| 4 OTM | −$54 | −86.7% | −5.1 |
+
+**The reverse of the hypothesis.** Returns get monotonically worse going out of
+the money, so the flat surface makes the wings RICH, not cheap — the realised
+tails are thinner than a flat-IV lognormal implies. Selling wings is therefore a
+real edge, but a small one (~$50k a heat at the full limit, with genuine tail
+risk), and it is beaten by the model we already have.
+
+Note every row is negative, which only says implied exceeded realised across
+these recordings after paying spread and commission. A static short-straddle
+model would earn about $58k a heat — again, less than the existing model.
+
+**3. Passive market making.** `limit_order_rebate` is **0.0** on every security,
+so there is no liquidity rebate to collect. Dead before it was built.
+
 ## What is actually left
 
 Not variance — **edge**. The one direction never tested is forecast quality:
