@@ -90,6 +90,16 @@ EXIT_VOL_EDGE = 0.003
 # Stop opening new positions in the last fraction of the case: near expiry ATM
 # delta flips between +/-1 on tiny moves and hedging it becomes ruinous.
 NO_NEW_AFTER = 0.90
+# Whether standing down near expiry also LIQUIDATES the position, or just stops
+# trading it and lets the options cash-settle.
+#
+# These are two different decisions and NO_NEW_AFTER has always conflated them.
+# Settlement is free - the case cash-settles at intrinsic - while liquidating
+# costs $2 a contract, about $2,000 for a straddle at the limit and $5,000 for
+# the full gross structure. The reason to stand down late is that the signal is
+# worse than a coin flip in the last 10% of the heat (sign_study: 37.5%); that
+# is an argument against TRADING there, not against holding what is already on.
+STAND_DOWN_CLOSES = True
 # Deadband on rebalancing, in contracts per leg.
 #
 # The target size moves with the vol gap, and the gap jitters tick to tick as

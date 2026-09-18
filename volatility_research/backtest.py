@@ -37,12 +37,19 @@ import sys
 import autotrader as at
 import config
 import news_parser
+import structure
 import vol_engine
 from replay import load, spot_of
 
 # Two ways to cut the between-news churn, tested side by side:
 #   raising the deadband so small target moves are ignored, versus
 #   refusing to resize at all until new information arrives.
+# Scales every transaction cost this simulation charges: the commission and
+# the half-spread paid to cross. 1.0 is the real market. 0.0 fills at mid for
+# free, which is not a strategy - it is a measuring stick for how much of the
+# model's P&L the friction is currently eating.
+FRICTION = 1.0
+
 POLICIES = (
     'continuous',        # re-evaluate the target every tick, 25% deadband
     'deadband-40',
@@ -90,6 +97,76 @@ def ratchet_target(target, held):
     return target if abs(target) > abs(held) else int(held)
 
 
+def order_changes(chain, desired, positions, rebalance_fraction):
+    """
+    This tick's option trades as [(row, change)], closes first.
+
+    Two rules, and the second one exists because the first can break the book.
+
+    The deadband skips a resize too small to be worth its fees. But the legs
+    are not independent: the wing short is what pays for the extra size at the
+    money, so skipping the at-the-money reduction while taking the wing close
+    leaves MORE net contracts than the limit allows. Seen at tick 75 of
+    heat_20260918_112741 - the wing came off, a 94-lot trim was 54 contracts
+    under the deadband, and the book sat at 1,186 net against a 1,000 limit,
+    which the server would have rejected outright.
+
+    So: the deadband is a fee optimisation and it is not allowed to produce an
+    illegal book. If skipping makes the book breach, the whole desired book is
+    traded - it is legal by construction.
+    """
+    def build(deadband):
+        out = []
+        for row in chain['rows']:
+            held = positions.get(row['ticker'], 0)
+            want = int(desired.get(row['ticker'], 0))
+            change = want - held
+            if change == 0:
+                continue
+            threshold = max(at.REBALANCE_MIN,
+                            rebalance_fraction * max(abs(want), abs(held)))
+            if deadband and want != 0 and abs(change) < threshold:
+                continue
+            out.append((row, change))
+        # Anything that shrinks a position goes first: both limits are enforced
+        # on submission, so room has to be freed before it can be used.
+        out.sort(key=lambda rc: 0 if abs(rc[1] + positions.get(rc[0]['ticker'], 0))
+                 < abs(positions.get(rc[0]['ticker'], 0)) else 1)
+        return out
+
+    changes = build(True)
+    after = dict(positions)
+    for row, change in changes:
+        after[row['ticker']] = after.get(row['ticker'], 0) + change
+    options = {t: q for t, q in after.items() if t != config.UNDERLYING}
+    gross, net = structure.limits_used(options)
+    if gross > config.LIMIT_OPT_GROSS or net > config.LIMIT_OPT_NET:
+        return build(False)
+    return changes
+
+
+def trade_reason(row, change, target, strike, late, positions):
+    """
+    Why this option trade is happening, for the friction breakdown.
+
+    Turnover is charged at $2 a contract - $1 fee, $1 of crossed spread - and
+    the model trades roughly twelve times its own position over a heat. Knowing
+    which of these reasons dominates is the difference between "reduce churn"
+    as a slogan and as a change.
+    """
+    held = positions.get(row['ticker'], 0)
+    want = held + change
+    if row['strike'] != strike:
+        return 'strike switch' if want == 0 else 'wing'
+    if want == 0:
+        return 'stand down (late)' if late else 'exit (edge gone)'
+    if held == 0:
+        return 'open'
+    if (want > 0) != (held > 0):
+        return 'flip'
+    return 'add' if abs(want) > abs(held) else 'trim'
+
+
 class Book:
     """Positions, cash and friction for one simulated run."""
 
@@ -109,6 +186,12 @@ class Book:
         # Straddle size held each tick, so studies can ask what we were holding
         # when the maker moved rather than only what we ended up with.
         self.sizes = []
+        # Contracts and dollars of friction attributed to WHY the trade
+        # happened. Turnover is the largest controllable cost in the model -
+        # about $24k a heat against a $132k mean - and "reduce churn" is not
+        # actionable until it is known which churn.
+        self.by_reason = {}
+        self.cost_by_reason = {}
 
     def mark(self, tick, rows, spot):
         """Record cash plus the marked value of everything currently open."""
@@ -121,30 +204,36 @@ class Book:
         net = sum(q for t, q in self.positions.items() if t != config.UNDERLYING)
         self.sizes.append((tick, net / 2.0))
 
-    def trade_option(self, row, change):
+    def trade_option(self, row, change, reason=None):
         if change == 0:
             return
         price = row['ask'] if change > 0 else row['bid']
         if not price:
             return
+        if reason:
+            self.by_reason[reason] = self.by_reason.get(reason, 0) + abs(change)
+            self.cost_by_reason[reason] = (self.cost_by_reason.get(reason, 0.0)
+                                           + abs(change) * 2.00)
+        mid = (row['bid'] + row['ask']) / 2.0 if row['bid'] and row['ask'] else price
+        price = mid + FRICTION * (price - mid)
         notional = price * abs(change) * config.CONTRACT_MULTIPLIER
-        fee = abs(change) * 1.00
+        fee = abs(change) * 1.00 * FRICTION
         self.cash += -notional - fee if change > 0 else notional - fee
         self.fees += fee
         # Cost of crossing from mid to the touch, tracked separately so the
         # friction split is legible. Already inside the fill price above.
-        self.spread += abs(change) * 1.00
+        self.spread += abs(change) * 1.00 * FRICTION
         self.positions[row['ticker']] = self.positions.get(row['ticker'], 0) + change
         self.contracts += abs(change)
 
     def trade_shares(self, spot, change):
         if change == 0:
             return
-        price = spot + (0.01 if change > 0 else -0.01)
-        fee = abs(change) * 0.01
+        price = spot + FRICTION * (0.01 if change > 0 else -0.01)
+        fee = abs(change) * 0.01 * FRICTION
         self.cash -= change * price + fee
         self.fees += fee
-        self.spread += abs(change) * 0.01
+        self.spread += abs(change) * 0.01 * FRICTION
         self.positions[config.UNDERLYING] = (
             self.positions.get(config.UNDERLYING, 0) + change)
         self.shares += abs(change)
@@ -267,7 +356,11 @@ def run(snapshots, policy, verbose=False, forecast_news=None,
         cap = min(config.LIMIT_OPT_NET // 2,
                   max(int((max(headroom, 0) + config.DELTA_LIMIT)
                           / config.CONTRACT_MULTIPLIER), 0))
-        if abs(gap) < at.EXIT_VOL_EDGE or late:
+        if late and not at.STAND_DOWN_CLOSES:
+            # Stop trading, but let what is held cash-settle rather than paying
+            # to close it. See STAND_DOWN_CLOSES.
+            target = None
+        elif abs(gap) < at.EXIT_VOL_EDGE or late:
             target = 0
         elif abs(gap) < at.ENTRY_VOL_EDGE:
             target = None                        # hold whatever we have
@@ -283,26 +376,43 @@ def run(snapshots, policy, verbose=False, forecast_news=None,
             # The gap sets a floor on conviction, not a target. See
             # ratchet_target: trimming into a narrowing gap is selling out of
             # the convergence that pays us.
-            legs = book.positions.get(call['ticker'], 0)
-            target = ratchet_target(target, legs)
+            #
+            # Measured in NET contracts, not in the size of the at-the-money
+            # leg. The wing structure inflates that leg with net room borrowed
+            # from the shorts, and a ratchet reading the inflated figure treats
+            # its own structure as conviction and ratchets again on top of it -
+            # which breaches both limits within two ticks. Net over two is the
+            # straddle the view actually asked for, and with the structure
+            # switched off it is exactly the leg count.
+            net_held = sum(q for t, q in book.positions.items()
+                           if t != config.UNDERLYING)
+            target = ratchet_target(target, int(net_held / 2))
         may_trade = (not news_gated) or pending_resize or target == 0
         if target is not None and may_trade:
-            # close anything at other strikes first (limit headroom)
-            for row in chain['rows']:
-                held = book.positions.get(row['ticker'], 0)
-                if row['strike'] != target_strike and held:
-                    book.trade_option(row, -held)
-            for leg in (call, put):
-                held = book.positions.get(leg['ticker'], 0)
-                change = int(target - held)
-                if change == 0:
-                    continue
-                threshold = max(at.REBALANCE_MIN,
-                                rebalance_fraction * max(abs(target), abs(held)))
-                if target != 0 and abs(change) < threshold:
-                    continue
-                book.trade_option(leg, change)
+            # What the limits allow us to hold for this view. With the wing
+            # structure switched off this is exactly the straddle, so the
+            # comparison against the shipped model stays like-for-like.
+            desired = structure.desired_book(chain, target_strike, target,
+                                             held=book.positions)
+            changes = order_changes(chain, desired, book.positions,
+                                    rebalance_fraction)
+            for row, change in changes:
+                book.trade_option(row, change,
+                                  reason=trade_reason(row, change, target,
+                                                      target_strike, late,
+                                                      book.positions))
             pending_resize = False
+
+            # The limits are hard: the server refuses anything past them, so a
+            # backtest that quietly exceeds them is scoring a book that could
+            # never have existed.
+            options = {t: q for t, q in book.positions.items()
+                       if t != config.UNDERLYING}
+            gross, net = structure.limits_used(options)
+            if gross > config.LIMIT_OPT_GROSS or net > config.LIMIT_OPT_NET:
+                raise AssertionError(
+                    f'tick {tick}: book breaches the option limits '
+                    f'(gross {gross}, net {net}): {options}')
 
         # ------------------------------------------- transient delta penalty
         # The hedge below lands in the same tick, which is why this backtest

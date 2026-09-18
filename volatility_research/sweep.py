@@ -24,6 +24,7 @@ from concurrent.futures import ProcessPoolExecutor
 import autotrader as at
 import backtest
 import config
+import structure
 from replay import load
 
 # One-at-a-time sweeps. Each entry is a parameter and the values to try; the
@@ -85,12 +86,16 @@ def apply(settings):
     """
     Push a settings dict onto the live modules.
 
-    Keys are attribute names on `autotrader`, or `config.NAME` for the few
-    tunables that live in `config` (the hedge band, the option limits).
+    Keys are attribute names on `autotrader`, or `config.NAME` / `structure.NAME`
+    for the tunables that live elsewhere (the hedge band and option limits in
+    `config`, the gross-capacity structure in `structure`).
     """
+    modules = {'config.': config, 'structure.': structure}
     for key, value in settings.items():
-        if key.startswith('config.'):
-            setattr(config, key.split('.', 1)[1], value)
+        for prefix, module in modules.items():
+            if key.startswith(prefix):
+                setattr(module, key[len(prefix):], value)
+                break
         else:
             setattr(at, key, value)
 
@@ -194,6 +199,51 @@ PUNTS = {
 }
 
 
+# Gross-capacity variants. The straddle is capped by the NET option limit at
+# 1,000 contracts while the GROSS limit allows 2,500, so shorting the cheapest
+# vega on the board buys net room for more of the most expensive. See
+# structure.py. Each entry is (wing contracts, max vega ratio to short at).
+GROSS = {
+    'wings 750, any ratio': (750, 1.00),
+    'wings 750, r <= 0.80': (750, 0.80),
+    'wings 750, r <= 0.60': (750, 0.60),
+    'wings 750, r <= 0.50': (750, 0.50),
+    'wings 750, r <= 0.40': (750, 0.40),
+    'wings 750, r <= 0.30': (750, 0.30),
+    'wings 375, r <= 0.60': (375, 0.60),
+    'wings 375, r <= 0.40': (375, 0.40),
+}
+
+
+def gross(paths, policy='ratchet+news'):
+    """Score the gross-capacity structure against the straddle, paired."""
+    off = {'structure.WING_CONTRACTS': 0}
+    stats, ref_rows = score(paths, off, policy=policy)
+    print(f'  reference (straddle only)  mean ${stats["mean"]:>10,.0f}   '
+          f'worst ${stats["worst"]:>10,.0f}   friction ${stats["friction"]:>8,.0f}\n')
+    print(f'  {"variant":<22} {"mean":>12} {"vs ref":>10} {"t":>6} '
+          f'{"worst":>11} {"friction":>10} {"P(10>=150k)":>12}')
+    for name, (contracts, ratio) in GROSS.items():
+        settings = {'structure.WING_CONTRACTS': contracts,
+                    'structure.WING_MAX_VEGA_RATIO': ratio}
+        stats, rows = score(paths, settings, policy=policy)
+        delta, _stderr, t = paired(ref_rows, rows)
+        band = heats10(rows)
+        print(f'  {name:<22} ${stats["mean"]:>11,.0f} {delta:>+10,.0f} {t:>6.1f} '
+              f'${stats["worst"]:>10,.0f} ${stats["friction"]:>9,.0f} '
+              f'{p_target(rows):>11.1%}')
+    print()
+
+
+def p_target(rows, target=150_000, draws=20000, seed=11):
+    """Chance the ten-heat average clears `target`, by bootstrap."""
+    import random
+    rng = random.Random(seed)
+    values = [value for _tag, value, _f, _p in rows]
+    return sum(1 for _ in range(draws)
+               if statistics.mean(rng.choices(values, k=10)) >= target) / draws
+
+
 def heats10(rows, draws=20000, seed=7):
     """
     Distribution of the 10-heat average, which is what the goal is stated in.
@@ -277,6 +327,8 @@ def main():
                         help='current config vs the proposed one')
     parser.add_argument('--sizing', action='store_true',
                         help='joint grid over the entry/full-size ramp')
+    parser.add_argument('--gross', action='store_true',
+                        help='spend the idle gross limit on wing shorts')
     parser.add_argument('--axis', action='append',
                         help='sweep only this parameter (repeatable)')
     parser.add_argument('--limit', type=int, help='use only the first N heats')
@@ -307,6 +359,8 @@ def main():
         ref = report(paths, 'current', {})
         report(paths, 'ramp 0.002/0.008',
                {'ENTRY_VOL_EDGE': 0.002, 'FULL_SIZE_VOL_EDGE': 0.008}, ref)
+    if args.gross:
+        gross(paths)
     if args.sizing:
         grid(paths, {},
              'ENTRY_VOL_EDGE', (0.001, 0.002, 0.004, 0.006, 0.008),
