@@ -7,3 +7,6 @@ volatility/heats/
 
 # RIT API key. Per-machine credential - never commit it.
 api_key.txt
+
+# Autotrader run logs - machine generated, per-run.
+volatility/logs/

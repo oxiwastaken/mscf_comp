@@ -185,6 +185,85 @@ Two rules came out of it, both now enforced in code:
 Straddles satisfy both structurally, which is why the trader uses them rather
 than picking whichever single option shows the largest edge.
 
+## First live automated heat (17 Sep, `logs/auto_233406.log`)
+
+Ran `autotrader.py --live` for a full 300-tick practice heat. **Final NLV
+−$15,154** on 152 order batches. The order path works — fills land, positions
+update — but the result decomposes damningly:
+
+| | |
+|---|---|
+| The volatility bet itself | **+$10,236** |
+| Friction (commission + spread) | **−$25,390** |
+| **Net** | **−$15,154** |
+
+**The view was right and was traded to death.** 10,540 option contracts and
+215,495 RTM shares churned, against a position that never exceeded ~500 lots.
+
+### Three bugs, all found only by trading live
+
+**1. Hedged a stale delta — this is where the money went.**
+`hedge()` used `chain['portfolio_delta']`, computed *before* the same tick's
+option trades. It hedged the pre-trade figure, then corrected a tick later:
+
+```
+23:37:35  SENT BUY  12,369 RTM
+23:37:36  SENT SELL 12,381 RTM     <- undone one second later
+23:37:37  SENT BUY   9,088 RTM
+```
+
+That one-tick lag accounts for essentially all 215,495 shares. Fixed with
+`projected_delta()`, which hedges the position the tick is about to *have*.
+Fills are immediate here (`execution_delay_ms: 0`), so the projection is exact.
+
+**2. Opened the new strike before closing the old one.** The net option limit is
+enforced on submission, so carrying both straddles at once got the new one
+rejected outright:
+
+```
+tick 236  K52  target +303
+  REJECTED BUY 303 RTM52C: ...will exceed net trading limits...
+  SENT SELL 404 RTM50C      <- only closes after the rejection
+```
+
+`close_other_strikes()` now runs before `rebalance()`.
+
+**3. Sizing ramp unreachable, strike switching too eager.** Full size needed a
+4.0-point gap; the heat produced 1.0–1.8 in `market` mode, so it sized at ~6% of
+capacity all heat. Recalibrated from the actual economics — opening a straddle
+costs ~$4 against ~$9.60/vol-point of vega, so breakeven is 0.42 points held to
+settlement (options cash-settle, no exit cost) and 0.84 closed early. Entry now
+0.8, full size 2.5. Strike switch distance widened to 1.5.
+
+### Replay independently confirms the hedge fix
+
+`replay.py` hedges *after* updating positions — i.e. correctly — and every mode
+is profitable on the same recorded ticks, where the live run lost money. The
+difference between +$34k–89k in replay and −$15k live is almost entirely that
+one-tick lag.
+
+## Tail-week mode — still open, one heat is not enough
+
+| Mode | Replay P&L | Forecast RMSE | Bias | Trades | Fees |
+|---|---|---|---|---|---|
+| `market` | **$89,148** | 8.11% | −6.83% | 408 | $19,684 |
+| `fixed` | $34,387 | **4.19%** | −3.02% | 94 | $7,620 |
+| `persist` | $47,381 | 8.40% | −7.09% | 550 | $26,182 |
+
+The two measures disagree — P&L favours `market`, accuracy favours `fixed` — so
+**this is not settled.** Three cautions before reading anything into it:
+
+- **`fixed` is the mode most at risk of being flattered by one heat.** It assumes
+  25% for unknown weeks, and this heat ran 11% → 16% → … → 35%, averaging near
+  25%. A quiet heat would punish it badly.
+- **All three show negative bias** (forecast below realised). This heat's vol rose
+  monotonically, so any forecast lags it. Probably heat-specific, not a model flaw.
+- **Replay's P&L does not test the straddle strategy.** `replay_pnl` still trades
+  individual options on dollar edge, which is not what `autotrader.py` now does.
+  The RMSE column is strategy-independent and therefore the more meaningful one.
+
+**Do not lock `TAIL_VOL_MODE` until 3–4 more heats are recorded.**
+
 ## Contradiction found in the official PDF
 
 The prose says 300 ticks with 75-tick weeks numbered from t=1. The sample news

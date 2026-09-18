@@ -47,13 +47,28 @@ import news_parser
 import vol_engine
 from rit_api import ApiException, RitClient
 
-# Enter when our forecast disagrees with the market by at least this much,
-# in vol points. 0.01 = 1 volatility point.
-ENTRY_VOL_EDGE = 0.010
-# Scale to full size by the time the gap reaches this.
-FULL_SIZE_VOL_EDGE = 0.040
-# Close out once the gap decays below this - the maker has learned.
-EXIT_VOL_EDGE = 0.004
+# Entry and sizing thresholds, in vol points (0.01 = 1 volatility point).
+#
+# Calibrated from the actual economics rather than guessed. Opening a straddle
+# costs roughly $4: half the 2-cent spread on each of two legs ($2) plus $1 per
+# contract commission on two contracts ($2). An ATM straddle's vega is about
+# S*phi(d1)*sqrt(T) per leg - near $9.60 per vol point for the pair at a typical
+# mid-case T of 0.06 years. Options here CASH-SETTLE, so a position carried to
+# expiry pays no exit cost at all.
+#
+#   breakeven held to settlement:  $4.00 / $9.60 = 0.42 vol points
+#   breakeven if closed early:     $8.00 / $9.60 = 0.84 vol points
+#
+# The first live heat ran gaps of 1.0-1.8 points in 'market' mode and 3.3-3.7 in
+# the others, so the previous 4.0-point full-size threshold was unreachable and
+# the trader sized at roughly 6% of capacity all heat. These values clear the
+# round-trip breakeven with a margin and reach full size at a gap this market
+# actually produces.
+ENTRY_VOL_EDGE = 0.008
+FULL_SIZE_VOL_EDGE = 0.025
+# Close out once the gap decays below this - the maker has learned. Held below
+# the open-and-hold breakeven, since exiting costs more than sitting still.
+EXIT_VOL_EDGE = 0.003
 # Stop opening new positions in the last fraction of the case: near expiry ATM
 # delta flips between +/-1 on tiny moves and hedging it becomes ruinous.
 NO_NEW_AFTER = 0.90
@@ -66,6 +81,15 @@ NO_NEW_AFTER = 0.90
 # commission each way to hold what is effectively the same position. Only trade
 # when the gap between target and holding is worth the fees.
 REBALANCE_MIN = 25
+# How far RTM must wander from the working strike before we move the position.
+#
+# Switching strike is expensive: it closes one straddle and opens another,
+# paying spread and commission on four legs. Seen in the first live heat at tick
+# 68, RTM drifted to 48.48 and the trader sold 28 of each K50 leg to buy 43 of
+# each K48 - a full round trip for a marginal vega improvement. Strikes are 1
+# apart, so holding until RTM is 1.5 away keeps us on a strike that is still
+# close to the money while cutting the number of switches sharply.
+STRIKE_SWITCH_DISTANCE = 1.5
 
 shutdown = False
 
@@ -175,8 +199,7 @@ class AutoTrader:
         if not usable:
             return None, by_strike
         if self._target_strike in usable:
-            nearest = min(usable, key=lambda k: abs(k - spot))
-            if abs(self._target_strike - spot) <= abs(nearest - spot) + 1.0:
+            if abs(self._target_strike - spot) <= STRIKE_SWITCH_DISTANCE:
                 return self._target_strike, by_strike
         self._target_strike = min(usable, key=lambda k: abs(k - spot))
         return self._target_strike, by_strike
@@ -232,10 +255,36 @@ class AutoTrader:
                      f'K{strike:.0f}  held {held:+.0f}  target {target:+d}'
                      + ('  [late]' if late else ''))
 
-        self.rebalance(call, put, target)
+        # Order matters. Close the strikes we are leaving FIRST: the net option
+        # limit is enforced on submission, so holding the old straddle while
+        # opening the new one gets the new one rejected outright. Seen live at
+        # tick 236 - a 303-lot of K52 bounced off the limit because 404 lots of
+        # K50 were still on the book, and only filled a tick later once K50 had
+        # been closed.
         self.close_other_strikes(chain, strike)
-        self.hedge(chain)
+        self.rebalance(call, put, target)
+        # Hedge the delta we are about to HAVE, not the one we had before
+        # trading. Hedging the stale figure and correcting next tick is what
+        # produced BUY 12,369 RTM followed one second later by SELL 12,381.
+        self.hedge(chain, strike, target)
         return True
+
+    def projected_delta(self, chain, strike, target):
+        """
+        Portfolio delta as it will stand once this tick's option trades land.
+
+        Every leg at the working strike goes to `target`; everything else is
+        being closed, so it contributes nothing. Fills are immediate in this
+        case (execution_delay_ms is 0), so the projection is what the next tick
+        will actually observe.
+        """
+        total = float(chain['underlying_position'])
+        for row in chain['rows']:
+            if row['delta'] is None:
+                continue
+            position = target if row['strike'] == strike else 0
+            total += position * row['delta'] * config.CONTRACT_MULTIPLIER
+        return total
 
     def rebalance(self, call, put, target):
         """
@@ -272,9 +321,10 @@ class AutoTrader:
             self.send(row['ticker'], action, abs(row['position']),
                       config.MAX_TRADE_OPTIONS)
 
-    def hedge(self, chain):
-        suggestion = vol_engine.hedge_suggestion(
-            chain['portfolio_delta'], limit=self.delta_limit)
+    def hedge(self, chain, strike=None, target=None):
+        delta = (chain['portfolio_delta'] if strike is None
+                 else self.projected_delta(chain, strike, target))
+        suggestion = vol_engine.hedge_suggestion(delta, limit=self.delta_limit)
         if not suggestion['action'] or suggestion['quantity'] <= 0:
             return
         quantity = suggestion['quantity']
@@ -283,12 +333,12 @@ class AutoTrader:
         if abs(projected) > config.LIMIT_RTM_GROSS:
             allowed = config.LIMIT_RTM_GROSS - abs(chain['underlying_position'])
             if allowed <= 0:
-                self.log(f'  CANNOT HEDGE: delta {chain["portfolio_delta"]:+,.0f} '
+                self.log(f'  CANNOT HEDGE: delta {delta:+,.0f} '
                          f'but RTM position is at its limit')
                 return
             quantity = min(quantity, allowed)
         if suggestion['over_limit']:
-            self.log(f'  delta {chain["portfolio_delta"]:+,.0f} OVER LIMIT, '
+            self.log(f'  delta {delta:+,.0f} OVER LIMIT, '
                      f'-${suggestion["penalty_per_second"]:,.0f}/s')
         self.send(config.UNDERLYING, suggestion['action'], quantity,
                   config.MAX_TRADE_RTM)

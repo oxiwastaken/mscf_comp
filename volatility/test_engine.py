@@ -372,7 +372,15 @@ t = make_trader()
 check('no position below the entry threshold',
       t.target_legs(0.005, flat_chain, 1000) == 0)
 check('a gap just over entry takes a small position',
-      0 < t.target_legs(0.012, flat_chain, 1000) < 100)
+      0 < t.target_legs(0.009, flat_chain, 1000) < 0.2 * 500,
+      f'got {t.target_legs(0.009, flat_chain, 1000)}')
+check('size ramps monotonically with the gap',
+      t.target_legs(0.010, flat_chain, 1000)
+      < t.target_legs(0.015, flat_chain, 1000)
+      < t.target_legs(0.020, flat_chain, 1000))
+check('a gap this market actually produces reaches real size',
+      t.target_legs(0.018, flat_chain, 1000) > 0.4 * 500,
+      f'got {t.target_legs(0.018, flat_chain, 1000)}')
 check('a large gap goes to the net-limit cap',
       t.target_legs(0.10, flat_chain, 1000) == 500)
 check('negative gap means short volatility',
@@ -427,6 +435,50 @@ check('short straddle sells both legs',
       t.client.sent == [('RTM50C', 'SELL', 200), ('RTM50P', 'SELL', 200)],
       f'sent {t.client.sent}')
 
+# The hedge must be computed from the position we are ABOUT to hold, not the
+# one we held before this tick's option trades. Hedging the stale figure and
+# correcting a tick later produced BUY 12,369 RTM followed by SELL 12,381 one
+# second afterwards, and 215,495 shares of round-tripping across one heat.
+print('\nprojected delta (hedge lag fix)')
+
+
+def drow(ticker, strike, flag, delta, position=0):
+    return {'ticker': ticker, 'strike': float(strike), 'flag': flag,
+            'delta': delta, 'position': position, 'tradeable': True}
+
+
+t = make_trader()
+# A lopsided book: 400 calls, no puts. Stale delta is enormous.
+lopsided = {
+    'underlying_position': 0,
+    'rows': [drow('RTM50C', 50, 'c', 0.50, 400), drow('RTM50P', 50, 'p', -0.50, 0)],
+}
+stale = vol_engine.portfolio_delta(lopsided['rows'], 0)
+check('stale delta on a half-built straddle is huge', close(stale, 20_000.0),
+      f'got {stale}')
+check('projected delta once both legs reach target is ~flat',
+      close(t.projected_delta(lopsided, 50.0, 400), 0.0),
+      f'got {t.projected_delta(lopsided, 50.0, 400)}')
+check('so the hedger no longer chases a transient',
+      abs(t.projected_delta(lopsided, 50.0, 400)) < abs(stale))
+
+# Positions at strikes we are closing must not count toward the hedge.
+leaving = {
+    'underlying_position': 1_000,
+    'rows': [drow('RTM48C', 48, 'c', 0.90, 500), drow('RTM48P', 48, 'p', -0.10, 500),
+             drow('RTM52C', 52, 'c', 0.05, 0), drow('RTM52P', 52, 'p', -0.95, 0)],
+}
+check('strikes being closed contribute nothing',
+      close(t.projected_delta(leaving, 52.0, 100),
+            1_000 + 100 * 0.05 * 100 + 100 * -0.95 * 100),
+      f'got {t.projected_delta(leaving, 52.0, 100)}')
+check('closing everything leaves only the share position',
+      close(t.projected_delta(leaving, 52.0, 0), 1_000.0))
+check('rows with no delta are skipped safely',
+      close(t.projected_delta(
+          {'underlying_position': 5,
+           'rows': [dict(drow('RTM50C', 50, 'c', 0.5, 10), delta=None)]}, 50.0, 10), 5.0))
+
 # Strike selection: at the money, and sticky so ordinary drift does not churn.
 rows = [leg(f'RTM{k}{s.upper()}', k, s) for k in (48, 49, 50, 51, 52)
         for s in ('c', 'p')]
@@ -435,8 +487,15 @@ strike, _ = t.pick_strike({'spot': 50.1, 'rows': rows})
 check('picks the nearest-to-money strike', strike == 50.0, f'got {strike}')
 strike, _ = t.pick_strike({'spot': 50.6, 'rows': rows})
 check('small drift does not move the strike', strike == 50.0, f'got {strike}')
-strike, _ = t.pick_strike({'spot': 52.0, 'rows': rows})
-check('a large move does switch strike', strike == 52.0, f'got {strike}')
+# The tick-68 churn: RTM at 48.48 used to force a K50 -> K48 round trip.
+strike, _ = t.pick_strike({'spot': 48.6, 'rows': rows})
+check('1.4 away holds the strike (was a costly round trip)', strike == 50.0,
+      f'got {strike}')
+strike, _ = t.pick_strike({'spot': 48.2, 'rows': rows})
+check('past 1.5 away it does switch', strike == 48.0, f'got {strike}')
+t2 = make_trader()
+strike, _ = t2.pick_strike({'spot': 52.0, 'rows': rows})
+check('a large move switches strike', strike == 52.0, f'got {strike}')
 
 untradeable = [leg(f'RTM{k}{s.upper()}', k, s, tradeable=(k == 49))
                for k in (48, 49, 50, 51, 52) for s in ('c', 'p')]
