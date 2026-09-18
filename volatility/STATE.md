@@ -7,13 +7,18 @@ Work tracker for the RITCx Volatility Trading Case build.
 
 ## THE GOAL — read this first
 
-**Average P&L across all 10 competition heats at or above $400,000.**
-Guiding theme: **"go big or go home (within reason)."** Optimise for expected
-P&L, not for safety — but stay inside the case's hard limits, which are enforced
-server-side and reject offending orders outright.
+**Average P&L across all 10 competition heats of $250,000–$300,000.**
+**This is non-negotiable.** Guiding theme: **"go big or go home (within
+reason)."** Optimise for expected P&L, not for safety — but stay inside the
+case's hard limits, which are enforced server-side and reject offending orders
+outright.
 
-Current standing: **+$76,003 average** over the six heats since the hedge fix
-(best +$112,634). The goal needs roughly **5x**.
+Current standing: **+$87,735 average** over the six news-gated heats
+(best +$162,011). The goal needs roughly **3x**.
+
+Revised down from an initial $400k after the ceiling arithmetic below. 3x is
+demanding but is *not* obviously past the structural limit the way 5x was — the
+gross-capacity lever alone is worth ~1.55x, and it is unbuilt.
 
 ### The ceiling, and why it is where it is
 
@@ -31,18 +36,30 @@ So **$400,000 requires capturing ~69 volatility points of convergence per
 heat.** Observed gaps have been 7–11 points across four news releases. Even
 capturing every gap perfectly and in full lands nearer **$150–200k**.
 
-**Honest assessment: $400k average is probably above the structural ceiling at
-the current position limit — but the estimate above is likely conservative.**
-Heat 8 returned **+$162,011**, already at the top of that $150–200k band, which
-says the simple vega calculation understates the result. The missing term is
-gamma scalping: a delta-hedged straddle earns the integral of gamma against
-(realised − implied) *variance* over the hold, not just vega × the vol gap, and
-that compounds when a position is held across a whole week rather than trimmed.
+That calculation is **known to be conservative**. Heat 8 returned +$162,011,
+above the band it implies, because it omits **gamma scalping**: a delta-hedged
+straddle earns the integral of gamma against (realised − implied) *variance*
+over the hold, not just vega × the vol gap. That term compounds when a position
+is carried across a whole week rather than trimmed — which is exactly what
+news-gating started doing at heat 6.
 
-So treat $400k as a stretch target that the levers below could plausibly bring
-within reach, rather than as arithmetically impossible. Do not mistake $250k for
-failure, and do not breach limits reaching for it — offending orders are
-rejected outright, and heat 1 showed an unhedgeable book costs $2,002/second.
+**Route to $250–300k from the $87,735 baseline:**
+
+```
+baseline (six news-gated heats)                    $87,735
+x1.55  gross-capacity lever (lever 1, unbuilt)    ~$136,000
+x1.25  sizing + late-heat + hedge band (2,3,4)    ~$170,000
+        ... remaining gap to $250k                 ~1.5x
+```
+
+The first two steps are mechanical and well understood. **The last 1.5x is not
+yet identified** and is the real work — candidates are better forecast quality
+(lever 5), capturing more of each convergence, or a structural idea not yet
+found. Do not pretend the arithmetic closes without it.
+
+Hard constraint regardless: **do not breach position limits reaching for this.**
+Offending orders are rejected outright, and heat 1 showed an unhedgeable book
+costs $2,002/second.
 
 ### Levers, largest first
 

@@ -10,3 +10,6 @@ api_key.txt
 
 # Autotrader run logs - machine generated, per-run.
 volatility/logs/
+
+# Accumulated overnight results (machine generated, regenerable).
+volatility/results.csv
