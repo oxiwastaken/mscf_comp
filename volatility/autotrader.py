@@ -360,19 +360,34 @@ class AutoTrader:
                      or self._pending_resize or target == 0)
 
         if may_trade:
-            # execute() hedges as it goes and returns the state it left behind.
-            # It must NOT be followed by hedge(), which reads
-            # chain['underlying_position'] - a figure captured before this
-            # tick's share trades and therefore blind to every hedge execute()
-            # just sent. Doing both re-hedged the same delta twice.
-            self.execute(chain, strike, call, put, target)
+            # execute() hedges as it goes and returns the state it left behind,
+            # anchored on this tick's true portfolio delta.
+            delta, underlying = self.execute(chain, strike, call, put, target)
             self._pending_resize = False
         else:
-            # Not trading this tick, so the hedge must project the position we
-            # are actually keeping, not the one we merely computed. Hedging the
-            # stale figure and correcting next tick is what produced
-            # BUY 12,369 RTM followed one second later by SELL 12,381.
-            self.hedge(chain, strike, int(round(held)))
+            # Not trading, so the book is exactly what the API just reported.
+            delta = float(chain['portfolio_delta'])
+            underlying = float(chain['underlying_position'])
+
+        # THE BACKSTOP. This runs every tick, in both branches, no exceptions.
+        #
+        # Change 1 removed the unconditional hedge that used to end every tick,
+        # on the grounds that execute() already hedges as it goes. That was
+        # wrong in a way no test caught: execute() hedges *between option
+        # chunks*, so when there are no chunks to send it does nothing at all -
+        # including no hedging. Ratchet sizing then made `held == target` the
+        # normal state rather than a rare one, so the common case became a tick
+        # that hedged nothing.
+        #
+        # Live cost, heat 143052: short 500 straddles at K49 while spot rose to
+        # 50.68. RTM sat unchanged at +2,708 for two hundred consecutive ticks
+        # while delta drifted to -44,763. 162 ticks over the limit, $467,262 of
+        # penalty, and a -$372,520 heat out of a position whose volatility view
+        # was making roughly +$95,000.
+        #
+        # Delta must be checked every tick whatever else happens, because the
+        # penalty accrues every second whatever else happens.
+        self.hedge_running(delta, underlying)
         return True
 
     def option_orders(self, chain, strike, call, put, target):

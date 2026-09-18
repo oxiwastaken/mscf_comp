@@ -467,6 +467,56 @@ check('a narrowing gap does not trim a short either',
 check('opening from flat uses the target',
       autotrader.ratchet_target(350, 0) == 350)
 
+print('\nthe hedge backstop')
+
+
+class StepClient(FakeClient):
+    """Enough of the API for one full step() through a held position."""
+
+    def __init__(self, securities, tick=150):
+        super().__init__()
+        self._securities = securities
+        self._tick = tick
+
+    def case(self):
+        return {'tick': self._tick, 'ticks_per_period': 300, 'status': 'ACTIVE'}
+
+    def securities(self):
+        return self._securities
+
+    def news(self):
+        return [{'tick': 1, 'headline': 'x',
+                 'body': 'The realized volatility of RTM for this week will be 40%'}]
+
+
+def option(ticker, strike, flag, position, bid, ask):
+    return {'ticker': ticker, 'type': 'OPTION', 'size': 100, 'position': position,
+            'bid': bid, 'ask': ask, 'last': (bid + ask) / 2, 'nlv': 0.0,
+            'vwap': 0.0, 'unrealized': 0.0, 'realized': 0.0,
+            'limits': [{'name': 'Limit-OPT'}], 'trading_fee': 1.0,
+            'is_tradeable': True}
+
+
+# The live failure, reduced: a SHORT straddle at K49 that is already at target,
+# with spot far above the strike so its delta is enormous. Nothing needs
+# trading, so execute() has no chunks - and before the backstop, that meant the
+# tick hedged nothing at all.
+securities = [
+    {'ticker': 'RTM', 'type': 'STOCK', 'size': 1, 'position': 2708,
+     'bid': 50.67, 'ask': 50.69, 'last': 50.68, 'nlv': 0.0, 'vwap': 0.0,
+     'unrealized': 0.0, 'realized': 0.0, 'limits': [{'name': 'Limit-ETF'}],
+     'trading_fee': 0.01, 'is_tradeable': True},
+    option('RTM49C', 49, 'c', -500, 1.80, 1.82),
+    option('RTM49P', 49, 'p', -500, 0.10, 0.12),
+]
+t = autotrader.AutoTrader(StepClient(securities), live=True)
+t.step()
+hedges = [s for s in t.client.sent if s[0] == config.UNDERLYING]
+check('a tick that trades nothing still hedges', hedges != [],
+      f'sent {t.client.sent}')
+check('and it hedges the right way (buys against a short-straddle delta)',
+      bool(hedges) and hedges[0][1] == 'BUY', f'sent {hedges}')
+
 print('\ninterleaved hedging')
 
 
