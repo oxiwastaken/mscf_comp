@@ -426,9 +426,20 @@ class AutoTrader:
         delta = float(chain['portfolio_delta'])
         underlying = float(chain['underlying_position'])
         for row, lot in self.chunks(chain, strike, call, put, target, delta):
+            moves = lot * (row['delta'] or 0.0) * config.CONTRACT_MULTIPLIER
+            # Make room BEFORE sending, not after. Hedging only afterwards left
+            # the chunk's own delta un-covered for the moment that matters: the
+            # band is 5,000 and a chunk carries up to 4,000, so the book could
+            # sit at 4,999 un-hedged, take a chunk, and stand at 8,999 - past
+            # the 7,000 limit, which is exactly the residual that survived the
+            # first version of this (peak 21,025 live).
+            delta, underlying = self.hedge_running(
+                delta, underlying,
+                trigger=max(config.HEDGE_TARGET_DELTA,
+                            self.delta_limit * 0.9 - abs(moves)))
             action = 'BUY' if lot > 0 else 'SELL'
             self.send(row['ticker'], action, abs(lot), config.MAX_TRADE_OPTIONS)
-            delta += lot * (row['delta'] or 0.0) * config.CONTRACT_MULTIPLIER
+            delta += moves
             delta, underlying = self.hedge_running(delta, underlying)
         return delta, underlying
 
@@ -496,15 +507,21 @@ class AutoTrader:
         per_contract = delta * config.CONTRACT_MULTIPLIER
         return max(1, min(config.MAX_TRADE_OPTIONS, int(budget / per_contract)))
 
-    def hedge_running(self, delta, underlying):
+    def hedge_running(self, delta, underlying, trigger=None):
         """
         Hedge a running delta mid-resize. Returns the updated (delta, position).
 
         RTM carries one delta per share, so the share trade moves the portfolio
         delta one for one. Tracking both locally avoids re-reading positions
         from the API between chunks, which would cost more time than it saves.
+
+        `trigger` lowers the bar when the chunk about to be sent needs room for
+        itself; left alone it uses the ordinary band.
         """
-        suggestion = vol_engine.hedge_suggestion(delta, limit=self.delta_limit)
+        suggestion = vol_engine.hedge_suggestion(
+            delta, limit=self.delta_limit,
+            trigger=(config.HEDGE_TRIGGER_DELTA if trigger is None
+                     else max(trigger, 0.0)))
         if not suggestion['action'] or suggestion['quantity'] <= 0:
             return delta, underlying
         quantity = suggestion['quantity']

@@ -520,6 +520,25 @@ check('a hedge that would breach the RTM limit is capped, not abandoned',
       all(q <= config.MAX_TRADE_RTM for tkr, _a, q in t.client.sent
           if tkr == config.UNDERLYING))
 
+# The residual that survived the first version. hedge_running only fires above
+# the 5,000 trigger while a chunk can carry 4,000 of delta, so a book sitting at
+# 4,999 could take a chunk and stand at 8,999 - past the limit. Starting from a
+# delta already just under the trigger reproduces it exactly.
+t = make_trader()
+t.execute({'rows': rows, 'portfolio_delta': 4_900.0,
+           'underlying_position': 0.0, 'spot': 51.23}, 52.0, k52c, k52p, -500)
+seen, worst = 4_900.0, 4_900.0
+for ticker, action, quantity in t.client.sent:
+    signed = quantity if action == 'BUY' else -quantity
+    if ticker == config.UNDERLYING:
+        seen += signed
+    else:
+        seen += signed * {r['ticker']: r for r in rows}[ticker]['delta'] \
+            * config.CONTRACT_MULTIPLIER
+    worst = max(worst, abs(seen))
+check('a chunk cannot breach the limit from just under the trigger',
+      worst <= config.DELTA_LIMIT, f'peaked at {worst:,.0f}')
+
 # Churn. Opening a NEAR-THE-MONEY straddle is the common case, and its legs have
 # opposite-signed deltas that nearly cancel. Sending every call chunk and then
 # every put chunk walks delta out and back, dragging hedges both ways - measured
