@@ -223,3 +223,39 @@ the ticks we hold anything, and the sign is already right 84.2% of the time. A
 better signal that merely rescales the gap cannot do anything at all — which is
 why the sizing ramp (a threshold change) was worth $19,554 while momentum (a
 magnitude change) was worth less than nothing.
+
+### Change 2, second pass — three more ideas, all dead
+
+| idea | result vs shipped |
+|---|---|
+| raise the entry floor to 0.003 / 0.005 / 0.007 | +$294 / −$26 / −$54, worst heat much worse |
+| hybrid forecast, shrink 0.15 / 0.50 / 1.0 | −$1,642 / −$7,455 / −$8,860 |
+| news jump (react faster) 0.25 / 1.0 | −$4,373 / −$10,714 |
+
+The **hybrid forecast** was the last untested lever named in STATE.md: shrink the
+market prior toward the volatility this heat has already announced, blended in
+variance space. It loses monotonically, which confirms the original reasoning for
+keeping `market` — deviate from the maker only where we genuinely know more, and
+the announced weeks are already used directly rather than as a prior.
+
+Raising the **entry floor** was motivated by real evidence and still did nothing.
+Sign accuracy in the 0.002-0.005 signal band is only 66.1% against 77%+ above it,
+so skipping those trades looked free. It is not, because with the ratchet those
+ticks are mostly HOLDS rather than entries, and the entry gate never reaches
+them. The worst heat degrades badly (to −$10,140 at 0.007) for no mean gain.
+
+### Where the sign actually fails (`sign_study.py`, 32,948 observations)
+
+| tick in heat | sign right | move-weighted | mean move |
+|---|---|---|---|
+| 0-25% | 76.1% | 81.6% | 1.89% |
+| 25-75% | ~75% | ~84% | 2.45% |
+| **75-90%** | **86.5%** | **87.8%** | 2.53% |
+| **90-100%** | **37.5%** | **18.1%** | **13.46%** |
+
+The last 10% of the heat is **worse than a coin flip while the moves are five
+times larger** — implied vol becomes numerically unstable as T approaches zero,
+so the signal is noise. `NO_NEW_AFTER = 0.90` already stands us down there, and
+this is the first direct evidence that the number is right rather than merely
+cautious. Ticks 225-270 are the single best window in the heat and we are fully
+engaged through them.

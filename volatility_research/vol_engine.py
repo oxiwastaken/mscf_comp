@@ -130,6 +130,21 @@ def blended_sigma(tick, ticks_total, week_vols, market_iv=None,
     # Prior for any week the news has not covered yet.
     if mode == 'market' and market_iv:
         prior = market_iv
+        # Hybrid: shrink the market's prior toward the volatility this heat has
+        # actually announced so far. `market` alone inherits the maker's own
+        # error on unannounced weeks, and `fixed` replaces it with an arbitrary
+        # constant that breaks whenever a heat runs unusually quiet or wild.
+        # The announced weeks are the one unbiased sample of this heat's regime
+        # we possess, and they cost nothing to use.
+        #
+        # Blended in VARIANCE space, because an option's price depends on
+        # integrated variance rather than on volatility.
+        shrink = getattr(config, 'TAIL_SHRINK', 0.0)
+        if shrink and week_vols:
+            observed = math.sqrt(sum(v ** 2 for v in week_vols.values())
+                                 / len(week_vols))
+            prior = math.sqrt((1 - shrink) * prior ** 2
+                              + shrink * observed ** 2)
     elif mode == 'persist' and week_vols:
         prior = week_vols[max(week_vols)]
     else:

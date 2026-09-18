@@ -93,6 +93,9 @@ MAX_TRADE_OPTIONS = 100
 #     python replay.py heats/*.jsonl    (scores every mode on identical ticks)
 TAIL_VOL_MODE = 'market'
 TAIL_VOL_FIXED = 0.25
+# Shrink the market prior toward the vol this heat has already announced.
+# 0.0 is pure `market`; 1.0 ignores the maker's prior entirely.
+TAIL_SHRINK = 0.0
 
 # TUNABLE: ignore implied vol solutions outside this range as numerically bad.
 IV_MIN = 0.01
