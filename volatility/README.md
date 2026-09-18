@@ -42,13 +42,36 @@ trading in RIT's own BookTrader. Never takes keyboard focus, so your typing
 always goes to RIT. Drag by the title bar, right-click to close.
 
 ```
-python overlay.py                    # display only
-python overlay.py --auto-hedge       # also manages delta (trades RTM only)
-python overlay.py --geometry +1200+700
+python overlay.py                        # display only (safe default)
+python overlay.py --trade                # arm buttons + hotkeys
+python overlay.py --trade --auto-hedge   # also manages delta in background
+python overlay.py --geometry +1200+700 --opacity 0.85
 ```
 
 RIT has no plugin API — its workspace format only accepts its own fixed window
 types — so this is as close to "inside RIT" as is possible.
+
+**Trading is off until you pass `--trade`.** Once armed there are two ways to
+fire, and the difference matters in a 5-minute heat:
+
+| | |
+|---|---|
+| **Buttons** | Obvious, but clicking the panel takes focus off RIT, so you have to click back into RIT afterwards |
+| **Hotkeys** | Registered system-wide, so they fire **without leaving RIT**. Use these during a heat |
+
+| Hotkey | Action |
+|---|---|
+| `ctrl+alt+B` | Buy the best buy-edge option |
+| `ctrl+alt+S` | Sell the best sell-edge option |
+| `ctrl+alt+H` | Hedge delta back inside the band |
+| `ctrl+alt+F` | Flatten delta to zero |
+
+`ctrl+alt` combinations are used specifically because RIT will never interpret
+them as ordinary typing. Hotkeys are registered only with `--trade`, so an
+unarmed overlay cannot fire anything. If one is already claimed by another app
+the panel says so rather than failing silently.
+
+Both paths refuse to trade when there's no live two-sided quote.
 
 **Console dashboard** — fuller table, keyboard trading.
 
