@@ -328,6 +328,40 @@ conclusion drawn from a single heat is noise. This is why `backtest.py`
 same-heat comparison is the only valid way to evaluate a change, and why the
 competition target is framed as a 10-heat average.
 
+### Heat 10 — excluded, but a useful accident
+
++$6,924, and **not comparable**: the trader was started at tick 233 of 300, past
+the tick-270 cutoff for opening new positions, and it **inherited a −23,336
+delta book it did not create** (a stale `overlay.py --trade` was left running
+with hotkeys armed). Do not average it in.
+
+It did double as an unplanned test of recovery from a broken book, which had
+never been checked. The trader hedged the inherited delta immediately, refused
+to open anything past the late cutoff, and wound the options flat — going from
+−$23k of delta exposure and −$1,634/second in penalties to +$10,715 inside about
+forty seconds. `hedgeable_legs` and the late-exit logic both behaved.
+
+## PRE-FLIGHT CHECKLIST — run before every competition heat
+
+```
+1. No stray processes. ONLY autotrader.py and record.py should be running.
+      Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'"
+   Kill any overlay.py --trade or dashboard.py. Two actors on one book is how
+   an unhedgeable position happens, and that costs up to $2,002/second.
+
+2. Account flat, NLV 0.
+
+3. python test_engine.py            -> expect 139 passed, 0 failed
+
+4. python autotrader.py --live --verbose
+
+5. Start BEFORE the heat does. It waits for ACTIVE by itself. Joining late
+   forfeits the early news releases, which is where the largest gaps appear.
+
+Afterwards:
+   python analyze.py logs/<file>.log --nlv <final>
+```
+
 Progression: heat 1→2 was the stale-delta hedge fix plus recalibrated sizing.
 2→3 was anti-churn (option churn −60%, friction −57%). 5→6 was news-gating,
 which cut option *sends* from 82 to 30 and RTM sends from 53 to 21. Heat 7 hit
