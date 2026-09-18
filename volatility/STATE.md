@@ -50,26 +50,27 @@ So **$400,000 requires capturing ~69 volatility points of convergence per
 heat.** Observed gaps have been 7–11 points across four news releases. Even
 capturing every gap perfectly and in full lands nearer **$150–200k**.
 
-That calculation is **known to be conservative**. Heat 8 returned +$162,011,
-above the band it implies, because it omits **gamma scalping**: a delta-hedged
-straddle earns the integral of gamma against (realised − implied) *variance*
-over the hold, not just vega × the vol gap. That term compounds when a position
-is carried across a whole week rather than trimmed — which is exactly what
-news-gating started doing at heat 6.
+That calculation was once thought conservative, on the grounds that it omits
+**gamma scalping** — a delta-hedged straddle earns the integral of gamma against
+(realised − implied) *variance*, not just vega × the vol gap. **That has now
+been tested and there is no gamma edge in this case.** Tightening the hedge band
+to harvest it loses money monotonically, down to −$13,596 (t −7.7) hedging flat
+every tick. The reason is in the case design: the maker prices at a **zero
+variance risk premium**, so realised volatility equals implied in expectation.
+Only the information asymmetry pays, and that is the vega trade.
 
-**Route to $250–300k from the $87,735 baseline:**
+So the $5,760-per-vol-point ceiling is the real one, and it binds. The route to
+$250–300k is **not** a stack of multipliers on this model — every multiplier
+that was supposed to supply them has been measured and is absent. It is:
 
 ```
-baseline (six news-gated heats)                    $87,735
-x1.55  gross-capacity lever (lever 1, unbuilt)    ~$136,000
-x1.25  sizing + late-heat + hedge band (2,3,4)    ~$170,000
-        ... remaining gap to $250k                 ~1.5x
+per-trader, tuned model            ~$125,000 live-equivalent
+x2  both team members run the bot  ~$250,000 TEAM P&L   <- the actual lever
 ```
 
-The first two steps are mechanical and well understood. **The last 1.5x is not
-yet identified** and is the real work — candidates are better forecast quality
-(lever 5), capturing more of each convergence, or a structural idea not yet
-found. Do not pretend the arithmetic closes without it.
+That is the whole route, and it is a logistics step rather than an engineering
+one. Anything beyond it needs a **materially different model**, not a better
+tuned one.
 
 Hard constraint regardless: **do not breach position limits reaching for this.**
 Offending orders are rejected outright, and heat 1 showed an unhedgeable book
@@ -103,7 +104,7 @@ again without new information.
    oracle results below: we already capture **94%** of what a trader who knew
    the maker's future quotes would earn. There is essentially nothing left here.
 
-### The oracle — how much money is actually in a heat (`volatility_punt/oracle.py`)
+### The oracle — how much money is actually in a heat (`volatility_research/oracle.py`)
 
 Two perfect-foresight traders, same fills, fees, hedging and limits, 95 heats:
 
@@ -603,9 +604,9 @@ Case length is read live from `ticks_per_period`, never hardcoded.
 | `sweep.py` | Parameter sweeps over the whole recording library. Paired per-heat comparison, bootstrapped 10-heat averages |
 | `test_engine.py` | 139 offline checks, no server needed |
 
-`../volatility_punt/` is a separate fork for higher-risk experiments, so this
+`../volatility_research/` is a separate fork for higher-risk experiments, so this
 model is never put at risk. It shares these recordings rather than copying
-them. `volatility_punt/PUNT.md` records why no punt dial exists: even pinned at
+them. `volatility_research/FINDINGS.md` records why no punt dial exists: even pinned at
 the full 1,000-contract limit for every tick of every heat, the per-heat
 standard deviation is $58,463 against this model's $58,854. The limits cap
 variance as hard as they cap the mean.

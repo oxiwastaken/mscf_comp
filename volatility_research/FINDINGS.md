@@ -1,15 +1,17 @@
-# PUNT MODEL — read this before changing anything
+# FINDINGS — what has been tried, and what it cost
 
-A fork of `../volatility`, kept separate so the working model is never put at
-risk. Same engine, same recordings, different risk appetite.
+Research fork of `../volatility`, kept separate so the working model is never
+put at risk. Same engine, shared recordings, free to break.
 
-**Purpose:** trade expected P&L for a fatter right tail, to raise the chance of
-a 10-heat average at $250–300k.
+**This file is the negative-results archive. Read it before proposing anything —
+its whole job is to stop good-sounding ideas being rebuilt.** Everything here is
+measured over 95 recorded heats with paired per-heat comparison, which is the
+only way to see past a $59k per-heat standard deviation.
 
-**Status as of 18 Sep 2026: the purpose is not achievable, and the reason is
-structural rather than a tuning failure.** Everything below is measured over
-95 recorded heats. Keep the folder — it is the right place to try structural
-ideas — but do not expect a punt dial to close the gap, because there isn't one.
+The fork began as a "punt" model: trade expected P&L for a fatter right tail, to
+raise the chance of a $250–300k ten-heat average. **That purpose is dead, and
+the reason is structural rather than a tuning failure** — see the first section.
+New work continues in this folder under a different thesis.
 
 ---
 
