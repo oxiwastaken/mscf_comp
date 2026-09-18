@@ -191,6 +191,14 @@ def build_chain(securities, tick, ticks_total, week_vols, mode=None):
             continue
         flag, strike = parsed
         mid = _mid(sec)
+        # Read the fee from the server rather than the case PDF. Measured live
+        # on the practice server, options charge $1.00/contract and RTM
+        # $0.01/share - exactly HALF the $2.00 and $0.02 the PDF states. Using
+        # the PDF numbers made the edge hurdle twice too high and silently
+        # rejected trades that were in fact profitable.
+        fee_per_contract = sec.get('trading_fee')
+        if fee_per_contract is None:
+            fee_per_contract = config.FEE_PER_CONTRACT
         rows.append({
             'ticker': ticker,
             'flag': flag,
@@ -200,6 +208,8 @@ def build_chain(securities, tick, ticks_total, week_vols, mode=None):
             'last': sec.get('last'),
             'mid': mid,
             'position': sec.get('position', 0) or 0,
+            'fee_per_contract': fee_per_contract,
+            'fee_per_share': fee_per_contract / config.CONTRACT_MULTIPLIER,
             'market_iv': solve_implied_vol(mid, spot, strike, t_years, flag),
         })
 
@@ -276,8 +286,9 @@ def build_chain(securities, tick, ticks_total, week_vols, mode=None):
             row['iv_gap'] = forecast - row['market_iv']
 
         # Edge after actually transacting: buy at the ask, sell at the bid, and
-        # pay the $2/contract commission ($0.02 per underlying share).
-        fee = config.FEE_PER_OPTION_SHARE
+        # pay the real commission reported by the server, expressed per
+        # underlying share so it is comparable with option premium.
+        fee = row['fee_per_share']
         if row['ask']:
             row['buy_edge'] = fair - row['ask'] - fee
         if row['bid']:
@@ -297,6 +308,9 @@ def build_chain(securities, tick, ticks_total, week_vols, mode=None):
         'forecast_detail': detail,
         'market_avg_iv': market_avg_iv,
         'underlying_position': underlying.get('position', 0) or 0,
+        'underlying_fee': (underlying.get('trading_fee')
+                           if underlying.get('trading_fee') is not None
+                           else config.FEE_PER_SHARE),
         'portfolio_delta': portfolio_delta(rows, underlying.get('position', 0) or 0),
     }
 

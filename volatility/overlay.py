@@ -31,6 +31,7 @@ ordinary typing. Hotkeys are only registered when --trade is passed, so an
 unarmed overlay cannot fire anything.
 
 Drag the panel by its title bar. Right-click it to close.
+Ctrl + mouse wheel resizes it (see --font).
 """
 
 import argparse
@@ -62,7 +63,7 @@ HOTKEYS = {1: ('B', 0x42), 2: ('S', 0x53), 3: ('H', 0x48), 4: ('F', 0x46)}
 
 class Overlay:
     def __init__(self, root, client, trade=False, auto_hedge=False, mode=None,
-                 opacity=0.92, size=20):
+                 opacity=0.92, size=20, font_size=9):
         self.root = root
         self.client = client
         self.trade_enabled = trade
@@ -82,9 +83,14 @@ class Overlay:
         root.attributes('-alpha', opacity)
         root.configure(bg=BG)
 
-        mono = tkfont.Font(family='Consolas', size=9)
-        mono_bold = tkfont.Font(family='Consolas', size=9, weight='bold')
-        small = tkfont.Font(family='Consolas', size=8)
+        # The panel sizes itself to its text, so font size IS the window size.
+        # All three Font objects are kept and rescaled together on zoom.
+        self.font_size = font_size
+        mono = tkfont.Font(family='Consolas', size=font_size)
+        mono_bold = tkfont.Font(family='Consolas', size=font_size, weight='bold')
+        small = tkfont.Font(family='Consolas', size=max(6, font_size - 1))
+        self._fonts = (mono, mono_bold, small)
+        root.bind_all('<Control-MouseWheel>', self._zoom)
 
         bar = tk.Frame(root, bg=PANEL)
         bar.pack(fill='x')
@@ -167,6 +173,24 @@ class Overlay:
             user32.UnregisterHotKey(None, hotkey_id)
         self._hotkeys = []
         self.root.destroy()
+
+    # --------------------------------------------------------------- zoom
+    def _zoom(self, event):
+        """
+        Ctrl + mouse wheel resizes the panel.
+
+        The window has no OS border to drag (overrideredirect strips it, which
+        is what keeps it looking like part of the RIT workspace), and every
+        widget packs to its text, so growing the font is what grows the window.
+        Dragging a border would only add empty space around the same-sized text.
+        """
+        step = 1 if event.delta > 0 else -1
+        self.font_size = max(6, min(self.font_size + step, 22))
+        mono, mono_bold, small = self._fonts
+        mono.configure(size=self.font_size)
+        mono_bold.configure(size=self.font_size)
+        small.configure(size=max(6, self.font_size - 1))
+        self.note = f'font {self.font_size}pt'
 
     # ------------------------------------------------------------- dragging
     def _grab(self, event):
@@ -362,6 +386,10 @@ def main():
     parser.add_argument('--size', type=int, default=20,
                         help='contracts per option order')
     parser.add_argument('--opacity', type=float, default=0.92)
+    parser.add_argument('--font', type=int, default=9,
+                        help='font size; the panel sizes itself to its text, '
+                             'so this sets the window size (ctrl+wheel to '
+                             'change it live)')
     parser.add_argument('--geometry', default='+40+40',
                         help='initial position, e.g. +1200+700')
     args = parser.parse_args()
@@ -372,7 +400,8 @@ def main():
     root = tk.Tk()
     root.geometry(args.geometry)
     Overlay(root, RitClient(), trade=args.trade, auto_hedge=args.auto_hedge,
-            mode=args.mode, opacity=args.opacity, size=args.size)
+            mode=args.mode, opacity=args.opacity, size=args.size,
+            font_size=args.font)
     root.mainloop()
 
 

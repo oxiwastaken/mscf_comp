@@ -342,5 +342,110 @@ try:
 except ValueError:
     check('missing underlying raises', True)
 
+# ------------------------------------------------------------- autotrader
+print('\nautotrader sizing and rebalancing')
+import autotrader                                            # noqa: E402
+
+
+class FakeClient:
+    """Stands in for RitClient; records orders instead of sending them."""
+
+    def __init__(self):
+        self.sent = []
+
+    def send_in_chunks(self, ticker, action, quantity, max_chunk):
+        self.sent.append((ticker, action, int(quantity)))
+        return []
+
+    def limits(self):
+        return [{'name': 'Limit-OPT', 'gross_limit': 2500, 'net_limit': 1000}]
+
+
+def make_trader(**kwargs):
+    trader = autotrader.AutoTrader(FakeClient(), live=True, **kwargs)
+    return trader
+
+
+flat_chain = {'underlying_position': 0, 'spot': 50.0}
+
+t = make_trader()
+check('no position below the entry threshold',
+      t.target_legs(0.005, flat_chain, 1000) == 0)
+check('a gap just over entry takes a small position',
+      0 < t.target_legs(0.012, flat_chain, 1000) < 100)
+check('a large gap goes to the net-limit cap',
+      t.target_legs(0.10, flat_chain, 1000) == 500)
+check('negative gap means short volatility',
+      t.target_legs(-0.10, flat_chain, 1000) == -500)
+check('a straddle of N per leg is 2N against the 1,000 net limit',
+      abs(t.target_legs(0.10, flat_chain, 1000)) * 2 == 1000)
+check('max_legs caps the position',
+      make_trader(max_legs=120).target_legs(0.10, flat_chain, 1000) == 120)
+
+# The RTM52P lesson: never open what cannot be hedged inside the share limit.
+near_limit = {'underlying_position': 49_000, 'spot': 50.0}
+check('little RTM headroom shrinks the allowed straddle',
+      t.target_legs(0.10, near_limit, 1000) < 500)
+maxed = {'underlying_position': 50_000, 'spot': 50.0}
+check('no RTM headroom still allows the delta band itself',
+      t.hedgeable_legs(maxed) == config.DELTA_LIMIT // config.CONTRACT_MULTIPLIER)
+check('empty book allows the full straddle',
+      t.hedgeable_legs(flat_chain) >= 500)
+
+
+def leg(ticker, strike, flag, position=0, tradeable=True):
+    return {'ticker': ticker, 'strike': float(strike), 'flag': flag,
+            'position': position, 'tradeable': tradeable}
+
+
+t = make_trader()
+call, put = leg('RTM50C', 50, 'c', 300), leg('RTM50P', 50, 'p', 300)
+t.rebalance(call, put, 310)
+check('a change inside the deadband is not traded', t.client.sent == [],
+      f'sent {t.client.sent}')
+
+t = make_trader()
+t.rebalance(leg('RTM50C', 50, 'c', 300), leg('RTM50P', 50, 'p', 300), 400)
+check('a change past the deadband trades both legs',
+      t.client.sent == [('RTM50C', 'BUY', 100), ('RTM50P', 'BUY', 100)],
+      f'sent {t.client.sent}')
+
+t = make_trader()
+t.rebalance(leg('RTM50C', 50, 'c', 5), leg('RTM50P', 50, 'p', 5), 0)
+check('closing out ignores the deadband',
+      t.client.sent == [('RTM50C', 'SELL', 5), ('RTM50P', 'SELL', 5)],
+      f'sent {t.client.sent}')
+
+t = make_trader()
+t.rebalance(leg('RTM50C', 50, 'c', 300), leg('RTM50P', 50, 'p', 0), 300)
+check('a lopsided straddle self-corrects on the lagging leg only',
+      t.client.sent == [('RTM50P', 'BUY', 300)], f'sent {t.client.sent}')
+
+t = make_trader()
+t.rebalance(leg('RTM50C', 50, 'c', 0), leg('RTM50P', 50, 'p', 0), -200)
+check('short straddle sells both legs',
+      t.client.sent == [('RTM50C', 'SELL', 200), ('RTM50P', 'SELL', 200)],
+      f'sent {t.client.sent}')
+
+# Strike selection: at the money, and sticky so ordinary drift does not churn.
+rows = [leg(f'RTM{k}{s.upper()}', k, s) for k in (48, 49, 50, 51, 52)
+        for s in ('c', 'p')]
+t = make_trader()
+strike, _ = t.pick_strike({'spot': 50.1, 'rows': rows})
+check('picks the nearest-to-money strike', strike == 50.0, f'got {strike}')
+strike, _ = t.pick_strike({'spot': 50.6, 'rows': rows})
+check('small drift does not move the strike', strike == 50.0, f'got {strike}')
+strike, _ = t.pick_strike({'spot': 52.0, 'rows': rows})
+check('a large move does switch strike', strike == 52.0, f'got {strike}')
+
+untradeable = [leg(f'RTM{k}{s.upper()}', k, s, tradeable=(k == 49))
+               for k in (48, 49, 50, 51, 52) for s in ('c', 'p')]
+strike, _ = make_trader().pick_strike({'spot': 50.0, 'rows': untradeable})
+check('skips strikes whose IV the quote cannot pin', strike == 49.0,
+      f'got {strike}')
+strike, _ = make_trader().pick_strike(
+    {'spot': 50.0, 'rows': [leg('RTM50C', 50, 'c', tradeable=False)]})
+check('no usable strike returns None', strike is None, f'got {strike}')
+
 print(f'\n{PASS} passed, {FAIL} failed\n')
 raise SystemExit(1 if FAIL else 0)

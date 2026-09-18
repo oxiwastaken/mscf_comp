@@ -33,7 +33,35 @@ The key is read from `RIT_API_KEY`, else from `api_key.txt` next to `config.py`,
 else Rotman's `Rotman` default. `api_key.txt` is **gitignored** — it's a
 per-machine credential and does not belong in the repo.
 
-## During a heat
+## Automated trading
+
+```
+python autotrader.py            # DRY RUN - prints decisions, sends nothing
+python autotrader.py --live     # actually trades
+python autotrader.py --live --max-legs 300 --verbose
+```
+
+It holds an **at-the-money straddle** sized by how far our forecast disagrees
+with the market, and auto-hedges delta with RTM. A straddle is chosen over
+single options because it is ~delta-neutral by construction and ATM carries the
+most vega — pure volatility exposure that can't trap itself outside the delta
+band. (Learned the hard way: a 500-lot of `RTM52P` at delta −0.987 produced
+−49,342 delta with almost no vega, and couldn't be hedged within the share
+limit. See STATE.md.)
+
+| Behaviour | Value |
+|---|---|
+| Enter when | vol gap ≥ 1.0 points |
+| Full size at | vol gap ≥ 4.0 points |
+| Exit when | vol gap < 0.4 points (the maker has learned) |
+| Max size | 500 contracts/leg — 2×500 hits the 1,000 net limit |
+| Stops opening | last 10% of the case, where ATM delta flips violently |
+
+Safety: dry run by default, never opens what it can't hedge, respects live
+gross/net limits, refuses to trade without a two-sided quote, Ctrl-C exits
+cleanly.
+
+## Manual front ends
 
 Two front ends, same engine. Pick either, or run both.
 

@@ -65,7 +65,8 @@ the whole game.** The news is not adversarial; it is accurate by construction.
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Option entry | Manual, keypress | Sizing and strike choice are real judgement calls; two-day runway to validate |
+| Option entry | **Automated** (revised twice) | Started manual. A human cannot fill 1,000 contracts in 100-lot orders inside a decaying edge window, and the edge appears in bursts right after each weekly vol shock. `autotrader.py` |
+| Structure | **ATM straddles, not single options** | A straddle is ~delta-neutral by construction and ATM carries the most vega, so it is pure vol exposure that cannot trap itself outside the delta band. See the RTM52P episode below |
 | **Delta hedge** | **Automatic** (revised) | Penalty is $0.10/delta/**second**. One 100-lot of a 0.50-delta option = 5,000 delta instantly; 3,000 over the limit = **$300/sec**. Gamma drifts delta even when idle. Hedging needs no judgement, so a human in the loop adds nothing and costs seconds. Hysteresis (5,000→2,000) bounds churn |
 | Pricing signal | Implied vol vs blended forecast | The case is built to reward exactly this |
 | Market price input | **Mid**, execute at touch, net of fees | 2-cent spread is symmetric around the maker's model price; `last` is stale/one-sided |
@@ -155,6 +156,35 @@ a full IV surface — RTM52C at 11.75%, vega-weighted market average 6.30%.
 `live` flag, and both the dashboard and overlay refuse to show any signal or
 hedge while quotes are dead.
 
+### Live fees are HALF the published ones
+
+The API reports `trading_fee` of **$0.01/share** on RTM and **$1.00/contract**
+on options. The case PDF states $0.02 and $2.00. Using the PDF numbers set the
+edge hurdle twice too high and silently rejected profitable trades. Fees are now
+read per-security from the API, with the PDF values only as a fallback.
+
+Also read live: `api_orders_per_second` 50, `execution_delay_ms` 0,
+`is_enforce_trading_limits` true. Rate is a non-constraint; fills are instant;
+orders breaching a limit are rejected outright rather than partially filled.
+
+### The RTM52P episode — why the trader uses straddles
+
+Observed on a live practice heat: a 500-lot of `RTM52P` (delta **−0.987**)
+contributed **−49,342** portfolio delta by itself, on an option with almost no
+vega. Combined with 45,794 RTM shares held against a 50,000 limit, there was
+**not enough headroom left to hedge it** — the account sat at −27,016 delta,
+paying **$2,002/second**, with no legal trade back inside the band.
+
+Two rules came out of it, both now enforced in code:
+
+1. **Choose options for vega, not dollar edge.** A deep ITM option is nearly
+   pure stock exposure. The `MAX_IV_SPREAD` filter already excludes these.
+2. **Never open a position you could not hedge.** `hedgeable_legs()` caps size
+   by the remaining RTM headroom plus the delta band.
+
+Straddles satisfy both structurally, which is why the trader uses them rather
+than picking whichever single option shows the largest edge.
+
 ## Contradiction found in the official PDF
 
 The prose says 300 ticks with 75-tick weeks numbered from t=1. The sample news
@@ -181,7 +211,8 @@ Case length is read live from `ticks_per_period`, never hardcoded.
 | `news_parser.py` | Vol announcements → `{week: sigma}`. Permissive regex by design |
 | `vol_engine.py` | IV solve, greeks, integrated-variance blend, edges, hedging. Pure — sends nothing |
 | `dashboard.py` | Live console. Manual execute on keypress |
-| `overlay.py` | Always-on-top panel that floats over the RIT client. Display-only unless `--auto-hedge` |
+| `autotrader.py` | **Automated trader.** ATM straddles sized by the vol gap, auto-hedged. Dry run unless `--live` |
+| `overlay.py` | Always-on-top panel that floats over the RIT client. Display-only unless `--trade` |
 | `api_key.txt` | RIT API key. **Gitignored** — per-machine credential |
 | `record.py` | Read-only capture of a live heat → `heats/*.jsonl` |
 | `replay.py` | Scores every mode on identical recorded ticks |
