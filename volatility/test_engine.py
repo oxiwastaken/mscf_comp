@@ -790,12 +790,16 @@ wing_chain = {'rows': wing_rows, 'spot': 50.0, 'portfolio_delta': 0.0,
 
 book = structure.desired_book(wing_chain, 50.0, 500)
 gross, net = structure.limits_used(book)
-check('the structure spends the whole gross limit', gross == 2_500,
-      f'gross {gross}: {book}')
-check('and exactly the net limit, not a contract more', net == 1_000,
-      f'net {net}: {book}')
+buffer = structure.WING_NET_BUFFER
+check('the structure spends the gross limit bar the rotation buffer',
+      gross == config.LIMIT_OPT_GROSS - buffer, f'gross {gross}: {book}')
+check('and holds back exactly that buffer against the net limit',
+      net == config.LIMIT_OPT_NET - buffer, f'net {net}: {book}')
+check('never past either limit',
+      gross <= config.LIMIT_OPT_GROSS and net <= config.LIMIT_OPT_NET)
 check('the extra size goes to the money, where vega is highest',
-      book['RTM50C'] == 875 and book['RTM50P'] == 875, f'got {book}')
+      book['RTM50C'] == 875 - buffer // 2
+      and book['RTM50P'] == 875 - buffer // 2, f'got {book}')
 check('the shorts go to the cheapest vega on the board',
       book.get('RTM48P') == -375 and book.get('RTM52C') == -375,
       f'got {book}')
@@ -821,10 +825,37 @@ check('the same board with cheap wings does put them on',
 # Stickiness: the cheapest leg changes as RTM drifts, and re-picking it every
 # tick round trips 750 contracts to move a short to a wing barely cheaper.
 drifted = dict(wing_chain, spot=50.4)
-held = {'RTM50C': 875, 'RTM50P': 875, 'RTM48P': -375, 'RTM52C': -375}
+held = {'RTM50C': 875 - buffer // 2, 'RTM50P': 875 - buffer // 2,
+        'RTM48P': -375, 'RTM52C': -375}
 check('a wing already on the board is kept, not re-picked',
       structure.desired_book(drifted, 50.0, 500, held=held) == held,
       f'got {structure.desired_book(drifted, 50.0, 500, held=held)}')
+
+# THE ROTATION PROPERTY, which is what the buffer is for. Sitting exactly on
+# both caps there is no legal way to move a wing between strikes - opening the
+# new leg breaches gross, and closing the old one breaches NET, because closing
+# a short raises net. Holding back a few net contracts makes it legal in small
+# steps, and chunks() finds the sequence because it only sends a chunk that
+# leaves the book inside both limits.
+rotate_from = {'RTM50C': 875 - buffer // 2, 'RTM50P': 875 - buffer // 2,
+               'RTM48P': -375, 'RTM52C': -375}
+rotate_to = {'RTM50C': 875 - buffer // 2, 'RTM50P': 875 - buffer // 2,
+             'RTM48P': -375, 'RTM49C': -375}
+rotate_rows = [dict(row, position=rotate_from.get(row['ticker'], 0))
+               for row in wing_rows]
+t = make_trader()
+running = dict(rotate_from)
+worst_gross = worst_net = 0
+for row, lot in t.chunks(dict(wing_chain, rows=rotate_rows), rotate_to, 0.0):
+    running[row['ticker']] = running.get(row['ticker'], 0) + lot
+    gross, net = structure.limits_used(running)
+    worst_gross, worst_net = max(worst_gross, gross), max(worst_net, net)
+check('rotating a wing to another strike never breaches gross',
+      worst_gross <= config.LIMIT_OPT_GROSS, f'peaked at {worst_gross}')
+check('rotating a wing never breaches net either',
+      worst_net <= config.LIMIT_OPT_NET, f'peaked at {worst_net}')
+check('and the rotation completes',
+      {k: v for k, v in running.items() if v} == rotate_to, f'ended {running}')
 
 # The hedge has to be able to follow the structure. Late in a heat the money's
 # legs stop cancelling - a 0.95 call against a 0.05 put - so the extra size the

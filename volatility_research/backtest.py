@@ -384,17 +384,29 @@ def run(snapshots, policy, verbose=False, forecast_news=None,
             # which breaches both limits within two ticks. Net over two is the
             # straddle the view actually asked for, and with the structure
             # switched off it is exactly the leg count.
-            net_held = sum(q for t, q in book.positions.items()
-                           if t != config.UNDERLYING)
-            target = ratchet_target(target, int(net_held / 2))
-        may_trade = (not news_gated) or pending_resize or target == 0
-        if target is not None and may_trade:
-            # What the limits allow us to hold for this view. With the wing
-            # structure switched off this is exactly the straddle, so the
-            # comparison against the shipped model stays like-for-like.
+            rows = [dict(r, position=book.positions.get(r['ticker'], 0))
+                    for r in chain['rows']]
+            target = ratchet_target(
+                target, int(structure.held_conviction(rows, target_strike)))
+        # What the limits allow us to hold for this view. With the wing
+        # structure switched off this is exactly the straddle, so the
+        # comparison against the shipped model stays like-for-like.
+        desired = None
+        if target is not None:
             desired = structure.desired_book(
                 chain, target_strike, target, held=book.positions,
                 underlying=book.positions.get(config.UNDERLYING, 0))
+        # Only resize UP on new information. Coming DOWN is always allowed:
+        # standing the structure down when the hedge is running out of room is
+        # itself a trade, and gating it behind the next news release is what
+        # let the share position run to its 50,000 limit in the live replay.
+        held_gross = sum(abs(q) for t, q in book.positions.items()
+                         if t != config.UNDERLYING)
+        shrinking = desired is not None and (
+            sum(abs(int(q)) for q in desired.values()) < held_gross)
+        may_trade = ((not news_gated) or pending_resize or target == 0
+                     or shrinking)
+        if target is not None and may_trade:
             changes = order_changes(chain, desired, book.positions,
                                     rebalance_fraction)
             for row, change in changes:

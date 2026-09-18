@@ -1,0 +1,12 @@
+
+  125 recordings, policy ratchet+news
+
+  reference (shipped structure)  $139,129   worst $-31,434   friction $51,725
+
+  GAP_SMOOTHING
+        0.04  $   132,690     -6,440  t  -2.0  worst $  -21,925  friction $  50,557
+        0.06  $   138,008     -1,122  t  -0.4  worst $  -25,766  friction $  51,573
+        0.08  $   143,261     +4,132  t   2.0  worst $  -20,118  friction $  51,548
+         0.1  $   144,134     +5,004  t   3.3  worst $  -16,131  friction $  51,867
+        0.12  $   142,237     +3,108  t   2.0  worst $  -20,256  friction $  51,855
+

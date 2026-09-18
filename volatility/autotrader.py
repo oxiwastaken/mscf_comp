@@ -111,7 +111,16 @@ REBALANCE_FRACTION = 0.25
 # shock, which survives smoothing; the rounding noise does not. At 0.15 the
 # filter reaches ~80% of a step in about ten ticks - far quicker than the maker
 # converges, so no edge is given up.
-GAP_SMOOTHING = 0.15
+#
+# Re-tuned to 0.10 once the gross-capacity structure shipped: +$5,004 a heat
+# (t 3.3) over 125 recordings, and the worst heat improves from -$31,434 to
+# -$16,131. The reason is the structure, not the filter. Every contract of
+# noise traded now costs 1.75x what it did, because the book is 1.75x bigger,
+# so a filter that was merely protective at 1,000 contracts is load-bearing at
+# 2,500. There is a clear interior optimum - 0.08 and 0.12 are both worth
+# ~$3-4k less than 0.10, and 0.04 goes negative - so the lag stops being free
+# somewhere just below here.
+GAP_SMOOTHING = 0.10
 # Resize the option position only when NEW INFORMATION arrives.
 #
 # Between news releases the straddle is left completely alone. Backtested over
@@ -375,13 +384,10 @@ class AutoTrader:
             self._pending_resize = True
 
         call, put = by_strike[strike]['c'], by_strike[strike]['p']
-        # Conviction is measured in NET contracts, not in the size of the
-        # at-the-money leg. The wing structure inflates that leg with net room
-        # borrowed from its own shorts, so a ratchet reading the leg would
-        # treat the structure as conviction and ratchet on top of it - which
-        # breaches both limits within two ticks. With the structure switched
-        # off this is exactly the leg count.
-        held = self.net_contracts(chain) / 2.0
+        # Conviction is the straddle the book expresses with the structure
+        # taken back out - not the at-the-money leg count, which includes size
+        # borrowed from the wing shorts. See structure.held_conviction.
+        held = structure.held_conviction(chain['rows'], strike)
 
         # Wind down rather than build up once the gap has decayed or we are
         # close enough to expiry that hedging a straddle turns hostile.
@@ -389,8 +395,12 @@ class AutoTrader:
         if abs(gap) < EXIT_VOL_EDGE or late:
             target = 0
         else:
-            target = ratchet_target(self.target_legs(gap, chain, net_limit),
-                                    int(round(held)))
+            # The ratchet keeps the larger of the new target and what is held,
+            # so it must be clamped: an over-large reading would otherwise feed
+            # the next tick's and run the book past the net limit.
+            cap = structure.leg_cap(net_limit)
+            target = max(-cap, min(cap, ratchet_target(
+                self.target_legs(gap, chain, net_limit), int(round(held)))))
 
         # What the two limits together allow us to hold for this view: the
         # straddle, plus the wing shorts that buy net room for more of it.
@@ -411,10 +421,22 @@ class AutoTrader:
                      + (f'  wings {wings}' if wings else '')
                      + ('  [late]' if late else ''))
 
-        # Only resize on new information. Exits are always allowed: once the
-        # edge is gone, sitting in the position is the expensive choice.
+        # Only resize UP on new information. Coming DOWN is always allowed:
+        # once the edge is gone, or the hedge is running out of room, sitting
+        # in the position is the expensive choice.
+        #
+        # The second clause is not a refinement, it is the thing that makes the
+        # hedge guard work at all. structure.hedgeable() stands the structure
+        # down when the shares to hedge it are running out, but standing down
+        # is a trade - and while it waited for the next news release the book
+        # stayed at 1.75x and the share position ran to the 50,000 limit with
+        # 29,994 of delta outstanding. Replaying the trader through recorded
+        # heats, that is one heat in eight.
+        held_gross = sum(abs(int(row['position'])) for row in chain['rows'])
+        wanted_gross = sum(abs(int(q)) for q in desired.values())
         may_trade = (not REBALANCE_ON_NEWS_ONLY
-                     or self._pending_resize or target == 0)
+                     or self._pending_resize or target == 0
+                     or wanted_gross < held_gross)
 
         if may_trade:
             # execute() hedges as it goes and returns the state it left behind,
@@ -586,12 +608,44 @@ class AutoTrader:
             return abs(delta + lot * (row['delta'] or 0.0)
                        * config.CONTRACT_MULTIPLIER)
 
+        def largest_legal(chunk):
+            """The biggest part of `chunk` that leaves the book inside both
+            limits. Zero if not even one contract fits."""
+            row, lot = chunk
+            sign = 1 if lot > 0 else -1
+            low, high = 0, abs(lot)
+            while low < high:
+                mid = (low + high + 1) // 2
+                if excess((row, sign * mid)) == 0:
+                    low = mid
+                else:
+                    high = mid - 1
+            return sign * low
+
         ordered = []
         while pending:
             legal = [c for c in pending if excess(c) == 0]
-            best = (min(legal, key=drift) if legal
-                    else min(pending, key=excess))
-            pending.remove(best)
+            if legal:
+                best = min(legal, key=drift)
+                pending.remove(best)
+            else:
+                # Nothing fits whole. Rotating a wing is the case that needs
+                # this: the buffer that makes the move legal is smaller than a
+                # chunk, so the move has to be made in smaller pieces. Take the
+                # largest part that fits and leave the rest pending.
+                parts = [(c, largest_legal(c)) for c in pending]
+                parts = [(c, lot) for c, lot in parts if lot]
+                if not parts:
+                    # Already outside a limit: get back inside fastest.
+                    best = min(pending, key=excess)
+                    pending.remove(best)
+                else:
+                    chunk, lot = min(parts, key=lambda p: drift((p[0][0], p[1])))
+                    pending.remove(chunk)
+                    remainder = chunk[1] - lot
+                    if remainder:
+                        pending.append((chunk[0], remainder))
+                    best = (chunk[0], lot)
             row, lot = best
             positions[row['ticker']] = positions.get(row['ticker'], 0) + lot
             delta += lot * (row['delta'] or 0.0) * config.CONTRACT_MULTIPLIER

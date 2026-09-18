@@ -28,11 +28,12 @@ SHIPPING = {'structure.WING_CONTRACTS': 750,
             'STAND_DOWN_CLOSES': True}
 
 AXES = {
-    'STRIKE_SWITCH_DISTANCE': (1.0, 1.5, 2.0, 2.5),
-    'EXIT_VOL_EDGE': (0.002, 0.003, 0.005, 0.007),
-    'FULL_SIZE_VOL_EDGE': (0.006, 0.008, 0.012, 0.016),
-    'REBALANCE_FRACTION': (0.15, 0.25, 0.40),
-    'GAP_SMOOTHING': (0.10, 0.15, 0.25),
+    # Smoothing is where the re-tune paid: 0.10 was +$5,004 (t 3.3) over the
+    # shipped 0.15 and halved the worst heat. With 1.75x the position, acting
+    # on the maker's cent-rounding noise costs 1.75x as much, so the filter
+    # that was merely protective at the old size is now load-bearing. This
+    # looks for the floor - past some point the lag stops being free.
+    'GAP_SMOOTHING': (0.04, 0.06, 0.08, 0.10, 0.12),
 }
 
 
