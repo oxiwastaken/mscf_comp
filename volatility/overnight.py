@@ -201,6 +201,15 @@ def run(dry_run=False, allow_dirty=False):
             # --- children up and waiting, before the heat starts ----------
             if trader is None or trader.poll() is not None:
                 stop(trader)
+                # Re-check before EVERY heat, not just at startup. A fresh
+                # trader is spawned per heat, so an edit made while the loop is
+                # running goes live on the next one - which is exactly the
+                # failure this guard exists to stop, and checking only at
+                # startup would not have caught it.
+                if check_build(allow_dirty) is None:
+                    trader = recorder = None
+                    time.sleep(5.0)
+                    continue
                 tag = datetime.now().strftime('%H%M%S')
                 args = ['autotrader.py', '--verbose']
                 if not dry_run:

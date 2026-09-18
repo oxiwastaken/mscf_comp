@@ -90,6 +90,23 @@ EXIT_VOL_EDGE = 0.003
 # Stop opening new positions in the last fraction of the case: near expiry ATM
 # delta flips between +/-1 on tiny moves and hedging it becomes ruinous.
 NO_NEW_AFTER = 0.90
+# Taper the position as expiry approaches, because gamma does not.
+#
+# An at-the-money straddle's vega falls with sqrt(T) while its gamma RISES with
+# 1/sqrt(T), so a position held flat in contracts is buying less and less of
+# what we want and more and more of what we do not. Live evidence, heat at
+# 17:47 on build da50ee6: at tick 248 the book sat completely still - no option
+# orders for ten ticks - while RTM moved 51.62 to 52.35, and delta swung from
+# +12,053 to -28,710 on that move alone. The hedge only acts once a tick, so
+# that second cost $2,171, and 29 ticks in the heat were over the limit.
+#
+# Scaling the cap by sqrt(remaining/total) holds GAMMA roughly constant instead
+# of contracts. 0.0 disables the taper and keeps today's behaviour.
+GAMMA_TAPER = 0.0
+# Fraction of the heat after which the gross-capacity structure stands down.
+# The structure is 1.75x the contracts and therefore 1.75x the gamma, and it is
+# the optional part of the book. 1.0 leaves it on to the end.
+STRUCTURE_OFF_AFTER = 1.0
 # Whether standing down near expiry also LIQUIDATES the position, or just stops
 # trading it and lets the options cash-settle.
 #

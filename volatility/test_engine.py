@@ -729,6 +729,34 @@ t.execute({'rows': rows, 'portfolio_delta': 0.0, 'underlying_position': 0.0,
 check('an option order that bounces is not hedged against',
       t.client.sent == [], f'sent {t.client.sent}')
 
+
+class PartialClient(FakeClient):
+    """Fills option orders until one is refused, the way the limit does."""
+
+    def __init__(self, allow):
+        super().__init__()
+        self.allow = allow
+
+    def send_in_chunks(self, ticker, action, quantity, max_chunk):
+        if ticker != config.UNDERLYING:
+            if self.allow <= 0:
+                raise autotrader.ApiException(
+                    '...will exceed net trading limits')
+            self.allow -= 1
+        return super().send_in_chunks(ticker, action, quantity, max_chunk)
+
+
+# The rest of a tick's plan is stale once one order is refused: chunks()
+# sequences the whole tick up front, and every later chunk assumes the earlier
+# ones filled. Seen live on build da50ee6.
+t = autotrader.AutoTrader(PartialClient(allow=2), live=True)
+t.execute({'rows': rows, 'portfolio_delta': 0.0, 'underlying_position': 0.0,
+           'spot': 51.23}, straddle(k52c, k52p, -500))
+options_after = [s for s in t.client.sent if s[0] != config.UNDERLYING]
+check('a refused order stops the rest of the tick, rather than sending it '
+      'against a book that does not exist',
+      len(options_after) == 2, f'sent {options_after}')
+
 # Strike selection: at the money, and sticky so ordinary drift does not churn.
 rows = [leg(f'RTM{k}{s.upper()}', k, s) for k in (48, 49, 50, 51, 52)
         for s in ('c', 'p')]

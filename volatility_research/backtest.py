@@ -356,6 +356,14 @@ def run(snapshots, policy, verbose=False, forecast_news=None,
         cap = min(config.LIMIT_OPT_NET // 2,
                   max(int((max(headroom, 0) + config.DELTA_LIMIT)
                           / config.CONTRACT_MULTIPLIER), 0))
+        # Hold gamma roughly constant rather than contracts - see GAMMA_TAPER.
+        # Vega falls with sqrt(T), gamma rises with 1/sqrt(T), so a flat
+        # contract count buys less of what we want and more of what we do not
+        # as expiry approaches.
+        if at.GAMMA_TAPER:
+            remaining = max(ticks_total - tick, 0) / max(ticks_total, 1)
+            taper = remaining ** (0.5 * at.GAMMA_TAPER)
+            cap = int(cap * taper)
         if late and not at.STAND_DOWN_CLOSES:
             # Stop trading, but let what is held cash-settle rather than paying
             # to close it. See STAND_DOWN_CLOSES.
@@ -393,9 +401,15 @@ def run(snapshots, policy, verbose=False, forecast_news=None,
         # comparison against the shipped model stays like-for-like.
         desired = None
         if target is not None:
+            # The structure is 1.75x the contracts and so 1.75x the gamma, and
+            # it is the optional part of the book. Standing it down before the
+            # worst of the gamma arrives is cheaper than hedging through it.
+            wings = (0 if tick >= ticks_total * at.STRUCTURE_OFF_AFTER
+                     else structure.WING_CONTRACTS)
             desired = structure.desired_book(
                 chain, target_strike, target, held=book.positions,
-                underlying=book.positions.get(config.UNDERLYING, 0))
+                underlying=book.positions.get(config.UNDERLYING, 0),
+                wing_contracts=wings)
         # Only resize UP on new information. Coming DOWN is always allowed:
         # standing the structure down when the hedge is running out of room is
         # itself a trade, and gating it behind the next news release is what

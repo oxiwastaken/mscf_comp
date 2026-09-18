@@ -66,6 +66,20 @@ WING_MAX_VEGA_RATIO = 1.0
 # which a 0.5 ratio gate accepts and the other it rejects. Gate on the money.
 WING_MIN_EXTRA_VEGA = 0.0
 
+# Most extra GAMMA the structure may carry, in delta per $1 move of RTM.
+#
+# The mirror of the vega gate, and the live run is what motivated it. Build
+# da50ee6, heat at 17:47: the book sat still for ten ticks while RTM moved 0.73
+# and delta swung 40,763 - about 55,800 of gamma, of which the structure's
+# extra contracts were roughly 43%. The hedge only acts once a tick, so that
+# second cost $2,171 and the heat spent 29 ticks over the delta limit.
+#
+# Gating on the clock was tried first and the surface was not smooth enough to
+# believe - a 5% shift in the cutoff swung the mean by $5k, and the tick it
+# liked sits on the week-3 news boundary, which is calendar fitting rather than
+# a gamma effect. This gates on the thing itself. Zero disables it.
+WING_MAX_EXTRA_GAMMA = 0.0
+
 # Deploy the gross capacity only when the net limit is what is holding the
 # position back - i.e. at full conviction. Below full size the position is
 # limited by the view, not by the rules, and borrowing net room buys nothing.
@@ -373,6 +387,18 @@ def desired_book(chain, strike, target, held=None, net_limit=None,
         gate = (WING_MIN_EXTRA_VEGA * WING_KEEP_FRACTION if kept
                 else WING_MIN_EXTRA_VEGA)
         if extra < gate:
+            return {call['ticker']: target, put['ticker']: target}
+
+    # And the gamma it makes us carry, which is what the hedge has to chase
+    # between ticks. See WING_MAX_EXTRA_GAMMA.
+    if WING_MAX_EXTRA_GAMMA:
+        atm_gamma = abs(call.get('gamma') or 0.0)
+        wing_gamma = sum(abs(q) * abs(row_by_ticker[t].get('gamma') or 0.0)
+                         for t, q in book.items()
+                         if t in row_by_ticker and t not in
+                         (call['ticker'], put['ticker']))
+        added = (placed * atm_gamma - wing_gamma) * config.CONTRACT_MULTIPLIER
+        if added > WING_MAX_EXTRA_GAMMA:
             return {call['ticker']: target, put['ticker']: target}
 
     # Every contract of wing short is a contract of net room; spend it on the

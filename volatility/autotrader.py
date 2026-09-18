@@ -554,6 +554,21 @@ class AutoTrader:
             if self.send(row['ticker'], action, abs(lot),
                          config.MAX_TRADE_OPTIONS):
                 delta += moves
+            else:
+                # The plan is stale. chunks() sequences the whole tick up front
+                # against a simulated book, and every later chunk assumes this
+                # one filled - so once an order is refused, the rest are
+                # planned against a book that does not exist. Seen live on
+                # build da50ee6: a 100-lot of RTM49P filled, the 75-lot behind
+                # it was refused on the net limit, and the chunks after it were
+                # still sequenced as though it had not been.
+                #
+                # Stop, hedge what we actually have, and re-plan next tick from
+                # a fresh reading of the book. A tick of delay costs a tick of
+                # drift; sending orders against an imaginary book costs more.
+                self.log('  re-planning: an order was refused, '
+                         'the rest of this tick is stale')
+                break
             delta, underlying = self.hedge_running(delta, underlying)
         return delta, underlying
 
