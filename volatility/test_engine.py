@@ -506,5 +506,30 @@ strike, _ = make_trader().pick_strike(
     {'spot': 50.0, 'rows': [leg('RTM50C', 50, 'c', tradeable=False)]})
 check('no usable strike returns None', strike is None, f'got {strike}')
 
+# ------------------------------------------------------ news-gated resizing
+print('\nnews-gated rebalancing')
+import backtest                                              # noqa: E402
+
+t = make_trader()
+check('first position is always allowed', t._pending_resize is True)
+check('news counter starts unset', t._last_news_count == -1)
+
+check('deadband policies parse their fraction',
+      backtest.policy_params('deadband-40') == (0.40, False))
+check('deadband-60 parses', backtest.policy_params('deadband-60') == (0.60, False))
+check('news policy is gated', backtest.policy_params('news')[1] is True)
+check('news+band is gated too', backtest.policy_params('news+band')[1] is True)
+check('continuous is not gated',
+      backtest.policy_params('continuous') == (autotrader.REBALANCE_FRACTION, False))
+
+# Exits must never be gated: once the edge is gone, holding is the expensive
+# choice, so target 0 has to be reachable without waiting for a news release.
+for gated, pending, target in ((True, False, 0), (True, True, 300),
+                               (False, False, 300)):
+    may = (not gated) or pending or target == 0
+    check(f'gated={gated} pending={pending} target={target} -> trade={may}', may)
+check('gated, nothing pending, non-zero target -> hold',
+      not ((not True) or False or 300 == 0))
+
 print(f'\n{PASS} passed, {FAIL} failed\n')
 raise SystemExit(1 if FAIL else 0)

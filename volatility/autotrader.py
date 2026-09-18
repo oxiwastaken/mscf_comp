@@ -98,6 +98,30 @@ REBALANCE_FRACTION = 0.25
 # filter reaches ~80% of a step in about ten ticks - far quicker than the maker
 # converges, so no edge is given up.
 GAP_SMOOTHING = 0.15
+# Resize the option position only when NEW INFORMATION arrives.
+#
+# Between news releases the straddle is left completely alone. Backtested over
+# four recorded live heats (backtest.py), this beat continuous tick-by-tick
+# rebalancing in every single heat:
+#
+#     heat 1   $22,990  vs  $18,981
+#     heat 2   $62,137  vs  $23,596
+#     heat 3   $82,821  vs  $69,027
+#     heat 4  $138,087  vs $119,085
+#     mean     $76,509  vs  $57,672      (+33%)
+#
+# Only about $5k of that is saved commission. The larger part is that as the
+# market maker converges toward our forecast the gap SHRINKS, and continuous
+# rebalancing reacts by trimming - selling out of the very convergence that pays
+# us. Holding until the next release captures the whole move.
+#
+# Raising the rebalance deadband instead was tested and captures roughly a third
+# of the benefit (40-60% deadbands gained ~$4k; 80% went backwards), so the
+# threshold is the wrong lever.
+#
+# Delta is still hedged every tick regardless - the penalty accrues per second
+# and is not optional.
+REBALANCE_ON_NEWS_ONLY = True
 # How far RTM must wander from the working strike before we move the position.
 #
 # Switching strike is expensive: it closes one straddle and opens another,
@@ -129,6 +153,8 @@ class AutoTrader:
         self._last_tick = -1
         self._target_strike = None
         self._gap_ema = None
+        self._last_news_count = -1
+        self._pending_resize = True     # the first position is always allowed
 
     # ------------------------------------------------------------------ util
     def log(self, text):
@@ -241,6 +267,12 @@ class AutoTrader:
         if announced:
             self.delta_limit = announced
 
+        if len(news) != self._last_news_count:
+            if self._last_news_count >= 0:
+                self.log(f'  news release ({len(news)} total) - resizing')
+            self._last_news_count = len(news)
+            self._pending_resize = True
+
         chain = vol_engine.build_chain(securities, tick, total, week_vols,
                                        mode=self.mode)
         if not chain['live'] or not chain['forecast'] or not chain['market_avg_iv']:
@@ -255,10 +287,15 @@ class AutoTrader:
         gap = self._gap_ema
         _gross_limit, net_limit = self.option_limits()
 
+        previous_strike = self._target_strike
         strike, by_strike = self.pick_strike(chain)
         if strike is None:
             self.hedge(chain)
             return True
+        # Moving strike is new information about where the position belongs, so
+        # it earns a resize even without a news release.
+        if previous_strike is not None and strike != previous_strike:
+            self._pending_resize = True
 
         call, put = by_strike[strike]['c'], by_strike[strike]['p']
         held = (call['position'] + put['position']) / 2.0
@@ -279,18 +316,31 @@ class AutoTrader:
                      f'K{strike:.0f}  held {held:+.0f}  target {target:+d}'
                      + ('  [late]' if late else ''))
 
-        # Order matters. Close the strikes we are leaving FIRST: the net option
-        # limit is enforced on submission, so holding the old straddle while
-        # opening the new one gets the new one rejected outright. Seen live at
-        # tick 236 - a 303-lot of K52 bounced off the limit because 404 lots of
-        # K50 were still on the book, and only filled a tick later once K50 had
-        # been closed.
-        self.close_other_strikes(chain, strike)
-        self.rebalance(call, put, target)
+        # Only resize on new information. Exits are always allowed: once the
+        # edge is gone, sitting in the position is the expensive choice.
+        may_trade = (not REBALANCE_ON_NEWS_ONLY
+                     or self._pending_resize or target == 0)
+
+        if may_trade:
+            # Order matters. Close the strikes we are leaving FIRST: the net
+            # option limit is enforced on submission, so holding the old
+            # straddle while opening the new one gets the new one rejected
+            # outright. Seen live at tick 236 - a 303-lot of K52 bounced off the
+            # limit because 404 lots of K50 were still on the book, and only
+            # filled a tick later once K50 had been closed.
+            self.close_other_strikes(chain, strike)
+            self.rebalance(call, put, target)
+            self._pending_resize = False
+            hedge_target = target
+        else:
+            # Not trading this tick, so the hedge must project the position we
+            # are actually keeping, not the one we merely computed.
+            hedge_target = int(round(held))
+
         # Hedge the delta we are about to HAVE, not the one we had before
         # trading. Hedging the stale figure and correcting next tick is what
         # produced BUY 12,369 RTM followed one second later by SELL 12,381.
-        self.hedge(chain, strike, target)
+        self.hedge(chain, strike, hedge_target)
         return True
 
     def projected_delta(self, chain, strike, target):
