@@ -401,8 +401,8 @@ class AutoTrader:
             underlying=float(chain['underlying_position']))
 
         if self.verbose or target != round(held):
-            wings = sum(abs(q) for t, q in desired.items()
-                        if t not in (call['ticker'], put['ticker']))
+            wings = int(sum(abs(q) for t, q in desired.items()
+                            if t not in (call['ticker'], put['ticker'])))
             self.log(f'tick {tick:>3}/{total}  spot {chain["spot"]:.2f}  '
                      f'fcst {chain["forecast"] * 100:5.2f}%  '
                      f'mkt {chain["market_avg_iv"] * 100:5.2f}%  '

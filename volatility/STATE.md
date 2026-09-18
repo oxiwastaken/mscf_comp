@@ -833,6 +833,73 @@ Single live heats prove nothing here — identical code has returned −$15k and
 +$162k. `record.py` must be running in a loop; it exits at the end of each heat
 and it silently overwrites when given a fixed `--name`.
 
+## Change 3 — spend the gross limit (18 Sep, SHIPPED)
+
+**The idle capacity.** The case sets two option limits and they are not the
+same number: 2,500 contracts gross, 1,000 net, with "short positions negate any
+long positions" for the net one. A straddle spends 1,000 of each, so **1,500
+contracts of gross capacity sat unused in every heat we have ever run.**
+
+Vega is bought by the contract, so that cap is the whole ceiling: at roughly
+$5.76 of vega per ATM contract per vol point early in a heat, the net limit
+pins the position at about $5,760 a vol point however right we are.
+
+**The structure.** Shorting the cheapest vega on the board buys net room back,
+and it is spent on the dearest leg there is — the at-the-money straddle:
+
+```
+long  875 ATM calls + 875 ATM puts        net +1,750   gross 1,750
+short 375 + 375 of the two cheapest legs  net   -750   gross   750
+                                          net  1,000   gross 2,500
+```
+
+**+$7,829 a heat over 125 recordings, paired, t 3.7** ($131,300 → $139,129).
+P(ten-heat average ≥ $150k) goes from 17.6% to 32.1%.
+
+### Why this was worth re-opening
+
+`volatility_research/FINDINGS.md` had recorded the idea as dead: "It was built
+and tested. It lost roughly half the P&L on the first heat." That test was one
+heat against a $60k per-heat standard deviation — it could not have resolved an
+$8k effect in either direction. The finding was not wrong so much as unmeasured.
+
+### The gate is the finding
+
+Gating on the wing/ATM vega RATIO is gating on the wrong quantity. What the
+structure buys is `W * (v_atm - v_wing)` per vol point and what it costs is
+about $2 a contract on 2W contracts, fixed. A 0.60 ratio early in a heat buys
+$1,096 a vol point; a 0.18 ratio at tick 225 buys $1,282 — so a ratio gate
+takes the worse trade and refuses the better one. Gating on the dollars took
+t from 3.0 to 4.8 and lifted the worst heat by $38k.
+
+### Three things that did not work
+
+| idea | result |
+|---|---|
+| symmetric wings, one leg each side of spot | +$1,058 (t 0.8) vs +$6,301 cheapest-first |
+| never switch strike, to save the round trip | −$10,669 alone, −$67,500 with the structure |
+| riding the free delta band / conviction 0.8 / holding into settlement | all inside noise |
+
+Symmetry looked obviously right — both cheapest legs land on the same side of
+spot, which is one-sided short gamma. It costs five sixths of the trade, because
+forcing a leg onto the near side forces it onto a leg whose vega is close to the
+money's, and the vega SPREAD is the entire point.
+
+### What it cost, and the guard
+
+The hedge has to follow a 1.75x position inside an unchanged 50,000-share
+limit. Peak share usage goes from 25,733 to 39,684, worst heat 49,936 — 64
+shares of margin. `structure.hedgeable()` stands the structure down when the
+shares to hedge it are not there; the straddle is the view and never gives way.
+Discounting the straddle cap instead was tried first and costs 35% of the
+position in every heat to guard a breach that 125 recordings never produce.
+
+The delta penalty roughly doubles in the backtest ($8,768 → $18,842 a heat).
+That figure is the backtest's pessimistic model — it charges one full second of
+the whole pre-hedge delta at every resize, which is exactly what Change 1
+stopped doing. **The live number is the one to trust, and it is what the current
+live run is for.**
+
 ## Next moves, in order
 
 1. ~~Smoke-test against the practice server~~ — **done 17 Sep.** Read path

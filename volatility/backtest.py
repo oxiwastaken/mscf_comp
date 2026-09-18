@@ -37,6 +37,7 @@ import sys
 import autotrader as at
 import config
 import news_parser
+import structure
 import vol_engine
 from replay import load, spot_of
 
@@ -65,6 +66,54 @@ def policy_params(policy):
     if policy.startswith('news'):
         return at.REBALANCE_FRACTION, True
     return at.REBALANCE_FRACTION, False
+
+
+def order_changes(chain, desired, positions, rebalance_fraction):
+    """
+    This tick's option trades as [(row, change)], closes first.
+
+    Two rules, and the second one exists because the first can break the book.
+
+    The deadband skips a resize too small to be worth its fees. But the legs
+    are not independent: the wing short is what pays for the extra size at the
+    money, so skipping the at-the-money reduction while taking the wing close
+    leaves MORE net contracts than the limit allows. Seen at tick 75 of
+    heat_20260918_112741 - the wing came off, a 94-lot trim was 54 contracts
+    under the deadband, and the book sat at 1,186 net against a 1,000 limit,
+    which the server would have rejected outright.
+
+    So: the deadband is a fee optimisation and it is not allowed to produce an
+    illegal book. If skipping makes the book breach, the whole desired book is
+    traded - it is legal by construction.
+    """
+    def build(deadband):
+        out = []
+        for row in chain['rows']:
+            held = positions.get(row['ticker'], 0)
+            want = int(desired.get(row['ticker'], 0))
+            change = want - held
+            if change == 0:
+                continue
+            threshold = max(at.REBALANCE_MIN,
+                            rebalance_fraction * max(abs(want), abs(held)))
+            if deadband and want != 0 and abs(change) < threshold:
+                continue
+            out.append((row, change))
+        # Anything that shrinks a position goes first: both limits are enforced
+        # on submission, so room has to be freed before it can be used.
+        out.sort(key=lambda rc: 0 if abs(rc[1] + positions.get(rc[0]['ticker'], 0))
+                 < abs(positions.get(rc[0]['ticker'], 0)) else 1)
+        return out
+
+    changes = build(True)
+    after = dict(positions)
+    for row, change in changes:
+        after[row['ticker']] = after.get(row['ticker'], 0) + change
+    options = {t: q for t, q in after.items() if t != config.UNDERLYING}
+    gross, net = structure.limits_used(options)
+    if gross > config.LIMIT_OPT_GROSS or net > config.LIMIT_OPT_NET:
+        return build(False)
+    return changes
 
 
 class Book:
@@ -208,30 +257,35 @@ def run(snapshots, policy, verbose=False):
 
         # The trader lets the gap set a floor on conviction rather than a
         # target, so the backtest must too or it measures a strategy we do not
-        # run. See autotrader.ratchet_target.
+        # run. Measured in NET contracts, because the wing structure inflates
+        # the at-the-money leg with net room borrowed from its own shorts. See
+        # autotrader.ratchet_target and structure.desired_book.
         if target is not None:
-            target = at.ratchet_target(
-                target, int(book.positions.get(call['ticker'], 0)))
+            net_held = sum(q for t, q in book.positions.items()
+                           if t != config.UNDERLYING)
+            target = at.ratchet_target(target, int(net_held / 2))
 
         # ------------------------------------------------- rebalance policy
         may_trade = (not news_gated) or pending_resize or target == 0
         if target is not None and may_trade:
-            # close anything at other strikes first (limit headroom)
-            for row in chain['rows']:
-                held = book.positions.get(row['ticker'], 0)
-                if row['strike'] != target_strike and held:
-                    book.trade_option(row, -held)
-            for leg in (call, put):
-                held = book.positions.get(leg['ticker'], 0)
-                change = int(target - held)
-                if change == 0:
-                    continue
-                threshold = max(at.REBALANCE_MIN,
-                                rebalance_fraction * max(abs(target), abs(held)))
-                if target != 0 and abs(change) < threshold:
-                    continue
-                book.trade_option(leg, change)
+            desired = structure.desired_book(
+                chain, target_strike, target, held=book.positions,
+                underlying=book.positions.get(config.UNDERLYING, 0))
+            for row, change in order_changes(chain, desired, book.positions,
+                                             rebalance_fraction):
+                book.trade_option(row, change)
             pending_resize = False
+
+            # The limits are hard - the server refuses anything past them - so
+            # a backtest that quietly exceeds them is scoring a book that could
+            # never have existed.
+            options = {t: q for t, q in book.positions.items()
+                       if t != config.UNDERLYING}
+            gross, net = structure.limits_used(options)
+            if gross > config.LIMIT_OPT_GROSS or net > config.LIMIT_OPT_NET:
+                raise AssertionError(
+                    f'tick {tick}: book breaches the option limits '
+                    f'(gross {gross}, net {net}): {options}')
 
         # ------------------------------------------- transient delta penalty
         # This backtest hedges inside the same tick off the exact post-trade

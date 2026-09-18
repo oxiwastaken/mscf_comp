@@ -49,12 +49,28 @@ band. (Learned the hard way: a 500-lot of `RTM52P` at delta −0.987 produced
 −49,342 delta with almost no vega, and couldn't be hedged within the share
 limit. See STATE.md.)
 
+On top of that it spends the **gross** option limit, which a straddle leaves
+idle. The case allows 2,500 contracts gross but only 1,000 net, and shorts
+negate longs against the net limit — so shorting the cheapest vega on the board
+buys net room for more of the dearest:
+
+```
+long  875 ATM calls + 875 ATM puts        net +1,750   gross 1,750
+short 375 + 375 of the two cheapest legs  net   -750   gross   750
+                                          net  1,000   gross 2,500
+```
+
+Worth +$7,829 a heat over 125 recordings (t 3.7). It goes on only when the
+extra vega it buys clears $1,000 a vol point — the fees are fixed, so that,
+not the vega ratio, is the test. See `structure.py`.
+
 | Behaviour | Value |
 |---|---|
-| Enter when | vol gap ≥ 1.0 points |
-| Full size at | vol gap ≥ 4.0 points |
-| Exit when | vol gap < 0.4 points (the maker has learned) |
-| Max size | 500 contracts/leg — 2×500 hits the 1,000 net limit |
+| Enter when | vol gap ≥ 0.2 points |
+| Full size at | vol gap ≥ 0.8 points |
+| Exit when | vol gap < 0.3 points (the maker has learned) |
+| Max size | 875 contracts/leg with the structure on, 500 without |
+| Wing shorts | up to 750 contracts, at the two cheapest-vega legs |
 | Stops opening | last 10% of the case, where ATM delta flips violently |
 
 Safety: dry run by default, never opens what it can't hedge, respects live
