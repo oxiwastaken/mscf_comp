@@ -1316,6 +1316,58 @@ be re-run rather than re-argued.
 
 ---
 
+## `v27_holdall` (competition build) - v28 off, Windows hardening
+
+**The competition runs v27_holdall**, tradeoffs accepted. `BAR_ADD_SAME_WAY` is
+**0.0**, so the v28 block in `tender_safety` is skipped entirely and behaviour
+is identical to the `etf-v27-competition` tag. `RISK_MODEL` is back to
+`v27_holdall` so logged rows carry the name of the logic that produced them.
+
+Verified rather than assumed: every uppercase constant matches the tag, and
+`tender_safety` agrees with the tagged build on **900/900** cases across both
+actions, three sizes, five prices, five inventory states (flat, long and short,
+large and small) and six ticks.
+
+### Windows hardening - a stray character could abandon a heat
+
+`locale.getpreferredencoding(False)` on the competition machine is **cp1252**.
+Two values the bot handles are free text from the server:
+
+- tender `caption`, written to `tenders.csv` on every sighting, deliberately
+  **before** the accept and outside any `try`;
+- `accept_err`, which is `str(e)[:200]` of whatever the server returned.
+
+A character outside cp1252 raises `UnicodeEncodeError` on the write. That is
+not an `ApiException`, so it skips the per-cycle handler and lands in
+`run_heat`'s `except Exception`, which gives up the rest of the heat.
+
+Demonstrated, not theorised - the same row through both builds:
+
+    v27 (unfixed)          RAISED UnicodeEncodeError: 'charmap' codec can't
+                           encode character '：'
+    v27 + encoding fix     wrote the row OK
+
+All 958 logged captions are ASCII today, so this has never fired. It costs a
+heat when it does and the fix is free: every log opens `encoding="utf-8"`, and
+`sys.stdout`/`sys.stderr` are reconfigured to utf-8 with `errors="replace"` at
+import so the console can never be the thing that stops a run. All 22 existing
+logs still decode, so a restart can still seed its bars from `heats.csv`.
+
+The em dash and curly quotes that appear in most "unicode" test strings are
+**in** cp1252 and pass either way; the audit only found this because it hit
+`：`. `test_encoding.py` uses a character genuinely outside the codepage.
+
+### Also
+
+`RUNBOOK.md` - what the build does, the distribution being accepted, preflight
+and the suites, how to run it, the Windows notes, and what each error line
+means. `test_holdall.py` pins `BAR_ADD_SAME_WAY = 0.04` for its own checks
+rather than reading production, so the mechanism stays tested while the
+competition runs with it off - the same pattern `sim_unwind.py` uses for the
+hold tick.
+
+---
+
 ## Known open items
 
 - **Latent tracker mismatch under swap-heavy sequences.** With the unwind path

@@ -25,6 +25,7 @@ import base64
 import csv
 import os
 import signal
+import sys
 from datetime import datetime
 from pathlib import Path
 from time import sleep
@@ -32,6 +33,19 @@ from time import sleep
 import requests
 
 import calibration
+
+# Windows console default is cp1252, and a print() of anything outside it
+# raises UnicodeEncodeError. Tender captions and server error strings are free
+# text we do not control and both reach print() and the CSVs, so one unusual
+# character could otherwise abort a heat - UnicodeEncodeError is not an
+# ApiException, so the per-cycle handler does not catch it and the heat's
+# `except Exception` gives up the rest of the run. The logs are opened utf-8;
+# this covers the console.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):      # not a real console, or pre-3.7
+        pass
 
 # ============================================================================
 # CONNECTION
@@ -320,7 +334,13 @@ MIN_TENDER_EDGE_HELD = 0.08
 #   swap off           -8,931 (t -3.87) and a slightly worse tail. Keep it
 #   time-scaled bar    charge for holding time: ES5 moved erratically and the
 #                      worst heat got worse (-118,657, -160,415)
-BAR_ADD_SAME_WAY = 0.04
+#
+# OFF FOR THE COMPETITION. v27_holdall is the version being run, tradeoffs
+# accepted, so this is 0.0 and the block in tender_safety() is skipped
+# entirely - behaviour is byte-identical to the etf-v27-competition tag. The
+# evidence above stands and re-enabling is this one number; `etf-v28-candidate`
+# tags the build that had it on.
+BAR_ADD_SAME_WAY = 0.0
 # Guards the threshold comparison against float noise. Without it an edge of
 # 0.09999999 printed as "+0.1000 < 0.1" and declined an 84,000-unit tender
 # worth ~8,400 USD over a rounding artefact.
@@ -614,8 +634,8 @@ ARB_THRESHOLD_CAD = 0.07
 #             of gross and refusing 40,119 USD of tenders in one heat.
 #   v28_nodoubledown - a tender that adds to same-direction inventory must
 #             clear a bar 0.04 higher. Tail control; the mean is neutral.
-RISK_MODEL = "v28_nodoubledown"
-RISK_MODEL_DESC = "v27 plus: doubling down on held inventory costs 0.04 more edge"
+RISK_MODEL = "v27_holdall"
+RISK_MODEL_DESC = "hold every tender to close-out (unwind costs 3x what was assumed); bar 0.08 vs mid"
 
 LOOP_SLEEP = 0.5    # between cycles inside a heat (~8 requests per cycle)
 WAIT_POLL = 2.0     # between polls while waiting for the next heat
@@ -687,14 +707,14 @@ class CsvLog:
 
     def __init__(self, path, fields):
         if path.exists():
-            with path.open(newline="") as fh:
+            with path.open(newline="", encoding="utf-8") as fh:
                 header = next(csv.reader(fh), [])
             if header and header != fields:
                 archive = path.with_name(f"{path.stem}.{RUN_ID}.old.csv")
                 path.rename(archive)
                 print(f"  schema changed - archived previous {path.name} -> {archive.name}")
         is_new = not path.exists()
-        self.fh = path.open("a", newline="")
+        self.fh = path.open("a", newline="", encoding="utf-8")
         self.writer = csv.DictWriter(self.fh, fieldnames=fields, extrasaction="ignore")
         if is_new:
             self.writer.writeheader()
@@ -1956,7 +1976,7 @@ def load_prev_bases():
     if not path.exists():
         return {}
     try:
-        rows = list(csv.DictReader(path.open(newline="")))
+        rows = list(csv.DictReader(path.open(newline="", encoding="utf-8")))
     except OSError:
         return {}
     for r in reversed(rows):
@@ -1996,7 +2016,7 @@ def _mm_report(logs, heat, mm):
     new = not path.exists()
     fields = ["run_id", "risk_model", "heat", "fills", "volume", "passive_volume",
               "flatten_volume", "end_inventory", "pnl_cad", "disabled"]
-    with path.open("a", newline="") as fh:
+    with path.open("a", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=fields)
         if new:
             w.writeheader()

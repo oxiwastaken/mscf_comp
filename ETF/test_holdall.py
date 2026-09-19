@@ -55,6 +55,10 @@ ok, reason, edge = B.tender_safety(thin, {B.RITC: 0, B.BULL: 0, B.BEAR: 0}, book
 check("a tender below the held bar is refused", not ok and "closeout" in reason, reason)
 
 # BAR_ADD_SAME_WAY: doubling down costs more, reducing exposure does not.
+# Pinned rather than read from production: the competition runs v27, which sets
+# it to 0.0, and these checks are for the MECHANISM - it has to still work the
+# day someone turns it back on. Same reason sim_unwind.py pins the hold tick.
+B.BAR_ADD_SAME_WAY = 0.04
 # Edge is 0.10 in both cases - only the direction of existing inventory differs.
 flat = {B.RITC: 0, B.BULL: 0, B.BEAR: 0}
 sell = {"action": "SELL", "quantity": 80_000, "price": 25.10}   # signed -80,000
