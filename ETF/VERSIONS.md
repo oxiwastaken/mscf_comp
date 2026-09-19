@@ -1055,6 +1055,148 @@ itself again on its own and cannot.
 `[82000, 77000, 77000, 77000]`. v22's own regression cases were all flickers
 from an exactly-reconciled tracker, which is why they passed.
 
+## Replay harness - comparing policies on the same heats
+
+`replay_tenders.py` replays every logged full heat's tender stream through a
+parameterised policy, so two policies are compared on identical markets. Live
+A/B cannot do this cheaply: heat P&L has an sd of ~53,000, so resolving a 10,000
+difference needs ~450 full heats per version. Paired replay removes the market
+from the comparison.
+
+The tender stream and prices are exact; held tenders are exact (close-out is
+proven). Unwind execution is modelled at a measured cost, so the harness
+**cannot evaluate changes to how we unwind** - only which tenders to take and
+whether to hold them.
+
+**Validation, before any experiment:**
+
+| check | result |
+|---|---|
+| exit model, live accepts replayed (19 heats) | correlation 0.86 with live P&L, error sd 26,313 against heat sd 51,509, bias -13,533 |
+| gate, v21 parameters on v21 heats | 42 of 45 live accepts reproduced (93%) |
+
+The first version scored 0.42. The missing piece was **FX**: the live bot
+converts every USD flow to CAD as it happens (`hedge_fx` flattens USD cash each
+cycle), and USD/CAD moves with an sd of ~0.04 inside a heat on a ~2.25M USD
+tender notional. Converting at the close instead is what a USD-only analysis
+implicitly assumes - which also means the earlier chat-only estimate that held
+tenders realised +0.338/unit, measured in USD, should not be relied on.
+
+**Findings, 39 heats, 309 tenders:**
+
+- **v21 vs v23 is a wash in expectation.** At the measured flicker rate (4.2% of
+  pre-hold accepts, 300 paired draws) v23 is +413/heat, t +0.19. The fix is a
+  correctness and tail-risk fix, not a mean improvement; the gap between their
+  live means is noise.
+- **Current settings are at or near the best tested.** No setting beat
+  `min_edge 0.04 / hold 200` at |t| >= 2. Raising the bar costs money: 0.08 is
+  -6,511/heat (t -2.25), 0.12 is -12,064 (t -2.49).
+- **Holding is valuable.** Never holding costs ~9,000/heat at the live bar, and
+  up to -30,107 (t -4.59) at a 0.12 bar.
+- **Holding from tick 150 looked +7,609/heat (t +1.66) but does not
+  replicate:** +15,940 in the first half of the heats, -306 in the second. Left
+  at 200.
+- **The FX treatment is fine.** Keeping USD until close-out instead of
+  converting is +1,274/heat (t +0.22) with a higher sd; no change.
+
+## `v24_swap` - take blocked tenders by dumping for them
+
+**How the case is scored changes what "better" means.** Per the RITCx page, ETF
+arbitrage teams are ranked per heat by P&L and the heat ranks are averaged. A
++140,000 heat earns no more than first place; a -50,000 heat can mean last. So
+policies are now judged on their downside (10th/25th percentile heat, losing
+heats) as well as their mean - `structural.py` reports both.
+
+Two structural ideas were tested on the replay harness, 41 full heats, paired:
+
+| policy | mean | median | p10 | p25 | sd | paired vs live |
+|---|---|---|---|---|---|---|
+| live (v23) | +56,044 | +61,354 | +816 | +33,694 | 44,279 | - |
+| swap, dump cost 0.10 | +58,972 | +61,515 | +816 | +34,050 | 47,547 | +2,929 (t +3.17) |
+| hedge 100% held, 0.03/leg | +45,693 | +45,495 | +7,731 | +28,836 | 29,341 | -10,350 (t -2.38) |
+
+**Swap - adopted.** When a tender clears the edge bar but not the limits, dump
+just enough same-direction tender inventory at market to fit, if its edge pays
+for the dump. Positive at every dump cost tested (it self-limits), significant
+up to 0.15, replicates in both halves (+3,746 / +2,150), downside unchanged,
+~0.3 swaps a heat. The live decision assumes `SWAP_DUMP_COST = 0.15`, near the
+~0.14 walk plus fee that v8/v9 paid pushing ~90,000 units out at once. Only
+tender inventory is ever dumped, never the arb's legs. `test_swap.py` covers the
+sizing, the no-pay case, direction, the arb legs, and partial fills.
+
+**Basket hedge of held inventory - rejected.** It does what it says to risk (sd
+44k to 29k, p10 +0.8k to +7.7k) but costs the typical heat: median -16k, p25
+-5k, mean -10k, and the loss replicates in both halves. Ranks are averaged over
+heats, so the typical heat matters more than the worst one; this only pays if
+the field turns out to cluster around our worst outcomes.
+
+## `v25_mmtest` - live test of passive RITC market making
+
+The one structural idea the replay could not test: whether passive quotes fill
+is unknowable offline, because the logs carry no trade prints. So this is a
+deliberately small live test that measures it.
+
+**What it does.** While the tender side is idle - no tender inventory held, no
+tender on offer, ticks 5-285 - it quotes 3,000 RITC a side one tick inside the
+touch (at the touch when the spread is one tick), earning the 0.01 rebate
+instead of paying the 0.02 fee. It leans on fair value, (BULL + BEAR) / USD:
+rich to it, only the offer shows; cheap, only the bid. Inventory is capped at
++/-9,000.
+
+**Staying out of the tenders' way**, which are worth 10-50x more:
+- quoting pauses while any tender is on offer;
+- inventory is flattened at market only when it is actually in the way - a
+  tender refused on the limits, or tender inventory being taken on. Flattening
+  on every tender sighting would pay the dump 6-8 times a heat for nothing;
+- tender inventory must never coexist with MM inventory, or the v16/v23
+  tracker would net one against the other and the end-of-heat flatten would
+  leave a stray position;
+- a loss of `MM_MAX_LOSS` (5,000 CAD) in a heat switches it off for that heat.
+
+**Measured in `logs/mm.csv`**, one row per heat: fills, volume, passive vs
+flatten volume, end inventory, P&L in CAD. Every fill is also in `trades.csv`
+with `direction = mm`.
+
+**What counts as working:** MM P&L positive per heat with real fill volume,
+and tender results unchanged - same accept counts, no rise in limit refusals.
+If fills are rare or P&L negative after a fair sample, it comes out.
+
+`test_mm.py` drives it against a fake exchange: quoting inside the touch, no
+duplicate quotes, repricing, fill booking including a fill that races a
+cancel, leaning on fair value, the inventory cap, pausing without dumping, the
+blocked-tender flatten, the tender-inventory flatten, and the kill switch.
+
+## `v26_mmoff` - market making off after one live heat
+
+v25's first full heat answered the question the replay could not. Quotes fill
+readily - 61 passive fills, 159,996 units, no API errors - but they fill on the
+wrong side of the next move:
+
+| after our fill | move in our favour, USD/unit | fills in our favour |
+|---|---|---|
+| immediately | +0.0075 | 72% |
+| +1 tick | +0.0084 | 57% |
+| +5 ticks | -0.0229 | 34% |
+| +20 ticks | -0.0212 | 45% |
+| +50 ticks | +0.0045 | 50% |
+
+Quoting inside the spread starts each fill ~0.008 ahead of the mid, and the
+rebate adds 0.01, but within five ticks the price has moved ~0.023 against us.
+Inventory pinned at the +9,000 cap buying into a falling price, and the kill
+switch stopped it at -5,179 CAD. The move partly reverts by 50 ticks, but the
+cap and the flattens realise the loss first.
+
+One heat, and fills cluster in trends, so this is not settled - but it is a
+measured mechanism rather than an inference, and at up to ~5,000 a heat it
+costs more than v24's swap gains. Switched off; the code and `test_mm.py` stay.
+Tender results in that heat were unaffected in any way that could be
+attributed: 5 of 8 accepted, expected edge +43,580, and the heat's -30,459 is
+mostly held-inventory drift.
+
+**Next variant, if revisited:** quote at or outside the touch rather than
+inside it, so fills come only on larger moves and pay a wider spread each -
+fewer fills, less adverse selection. It needs its own live test.
+
 ## Known open items
 
 - ~~`basket_rich` is negative (−0.0218/unit over 8 arbs)~~ — **RETRACTED.**
