@@ -270,6 +270,7 @@ def run(snapshots, policy, verbose=False, forecast_news=None,
     iv_history = []
     target_strike = None
     last_news = -1
+    last_news_tick = None          # when the maker last got new information
     last_spot = None
     pending_resize = True          # always allowed to open the first position
     news_pnl_marks = []
@@ -330,6 +331,18 @@ def run(snapshots, policy, verbose=False, forecast_news=None,
                 gap_ema += at.NEWS_JUMP * (raw_gap - gap_ema)
                 gap = gap_ema + at.MOMENTUM_WEIGHT * momentum
             news_pnl_marks.append((tick, book.cash))
+            last_news_tick = tick
+
+        # Conviction decays with the AGE of the signal, not just its size.
+        # Our edge is the maker being slow to learn after a shock, so a gap
+        # that has been sitting on the board for sixty ticks is not the trade
+        # that the same gap was on the tick it appeared. See
+        # autotrader.SIGNAL_HALFLIFE_TICKS for the measurements that motivate
+        # this - sign accuracy falls to 63.8% in ticks 55-75, the window where
+        # week one's edge is spent and week two has not landed.
+        if at.SIGNAL_HALFLIFE_TICKS and last_news_tick is not None:
+            age = max(tick - last_news_tick, 0)
+            gap *= 0.5 ** (age / at.SIGNAL_HALFLIFE_TICKS)
 
         # ------------------------------------------------------ pick strike
         by_strike = {}
