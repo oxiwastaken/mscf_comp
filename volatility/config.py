@@ -10,7 +10,15 @@ Values marked TUNABLE are our own trading choices.
 import os
 
 # ---------------------------------------------------------------- connection
-API_HOST = 'http://localhost:9999'
+# The RIT CLIENT serves this API locally; the tournament server address
+# (flserver:16650) goes in the client, not here.
+#
+# Port 9998 rather than the usual 9999: on the competition machine the client
+# refused to bind 9999 - "conflicts with an existing registration" - a stale
+# HTTP.sys registration left by the previous client. Changing the port
+# sidesteps it. SET YOUR OWN PORT: either edit this line or export
+# RIT_API_HOST=http://localhost:9999
+API_HOST = os.environ.get('RIT_API_HOST', 'http://localhost:9998')
 
 
 def _load_api_key():
