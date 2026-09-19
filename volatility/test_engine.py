@@ -976,5 +976,73 @@ for gated, pending, target in ((True, False, 0), (True, True, 300),
 check('gated, nothing pending, non-zero target -> hold',
       not ((not True) or False or 300 == 0))
 
+# ------------------------------------------- state must not cross a heat
+# A trader left running between heats used to carry the last heat's smoothed
+# vol gap into the next one and open full size at tick 1 on it. The overnight
+# runner hides this by spawning a fresh process per heat; the competition,
+# where one trader sees ten heats, does not.
+print('\nheat-scoped state')
+
+
+class HeatClient(FakeClient):
+    """A case that goes ACTIVE, STOPPED, then ACTIVE again as a new heat."""
+
+    def __init__(self, script):
+        super().__init__()
+        self.script = list(script)
+        self.step_index = 0
+
+    def case(self):
+        status, tick = self.script[min(self.step_index, len(self.script) - 1)]
+        return {'status': status, 'tick': tick, 'ticks_per_period': 300}
+
+    def securities(self):
+        raise AssertionError('should not be reached while the case is stopped')
+
+    def news(self):
+        return []
+
+
+t = make_trader()
+t._gap_ema = -0.10
+t._target_strike = 52.0
+t._last_news_count = 8
+t._last_tick = 299
+t.client = HeatClient([('STOPPED', 300)])
+check('a stopped case is not traded', t.step() is False)
+check('the old heat\'s gap is forgotten', t._gap_ema is None,
+      f'got {t._gap_ema}')
+check('the old heat\'s strike is forgotten', t._target_strike is None)
+check('the news counter is reset', t._last_news_count == -1)
+check('the tick counter is reset', t._last_tick == -1)
+check('the next heat may open a position', t._pending_resize is True)
+
+# The poll can miss the stopped window entirely if it lands either side of it.
+# The tick counter running backwards is then the only evidence of a new heat.
+t = make_trader()
+t._gap_ema = 0.09
+t._last_tick = 288
+t.log = lambda _text: None
+t.client = HeatClient([('ACTIVE', 3)])
+try:
+    t.step()
+except AssertionError:
+    pass            # securities() is deliberately unreachable in this fixture
+check('a backwards tick clears the old heat', t._gap_ema is None,
+      f'got {t._gap_ema}')
+
+# ... but an ordinary tick inside one heat must NOT reset anything, or the
+# smoothing is destroyed and every tick trades the raw gap.
+t = make_trader()
+t._gap_ema = 0.04
+t._last_tick = 120
+t.client = HeatClient([('ACTIVE', 121)])
+try:
+    t.step()
+except AssertionError:
+    pass
+check('an ordinary tick keeps the smoothed gap', t._gap_ema == 0.04,
+      f'got {t._gap_ema}')
+
 print(f'\n{PASS} passed, {FAIL} failed\n')
 raise SystemExit(1 if FAIL else 0)

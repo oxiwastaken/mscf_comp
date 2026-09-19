@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Emit one line per finished heat, plus an alarm if the runner stalls or dies.
+#
+# One event per heat is the useful cadence: results.csv gains a row when
+# overnight.py finishes one. Silence has to be distinguishable from health, so
+# a stalled runner and a dead runner both emit too - a heat is ~6m20s, and
+# nothing arriving for 15 minutes means something is wrong, not that the night
+# is quiet.
+cd "$(dirname "$0")" || exit 1
+
+STALL=900          # seconds without a heat before shouting
+last=$(wc -l < results.csv)
+seen=$(date +%s)
+
+while true; do
+    if ! n=$(wc -l < results.csv 2>/dev/null); then n=$last; fi
+    if [ "$n" -gt "$last" ]; then
+        tail -n "$((n - last))" results.csv | while IFS=, read -r fin tag nlv fric dir con sh os rs ticks log; do
+            printf 'HEAT %s  NLV $%s  friction $%s  contracts %s  shares %s  ticks %s\n' \
+                   "$tag" "$nlv" "$fric" "$con" "$sh" "$ticks"
+        done
+        last=$n
+        seen=$(date +%s)
+    fi
+
+    if ! tasklist //FI "IMAGENAME eq python.exe" //FO CSV 2>/dev/null | grep -q python.exe; then
+        echo "ALARM no python processes - the overnight runner is DEAD"
+        sleep 120
+    elif [ $(( $(date +%s) - seen )) -gt "$STALL" ]; then
+        echo "ALARM no heat finished in $(( ($(date +%s) - seen) / 60 )) minutes - runner stalled"
+        seen=$(date +%s)
+    fi
+    sleep 20
+done

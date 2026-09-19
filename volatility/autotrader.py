@@ -223,6 +223,31 @@ class AutoTrader:
         self.verbose = verbose
         self.delta_limit = config.DELTA_LIMIT
         self.orders_sent = 0
+        self.reset_heat_state()
+
+    def reset_heat_state(self):
+        """
+        Forget everything that belongs to ONE heat.
+
+        Every field here is an opinion formed inside a heat, and carrying any
+        of them across a boundary is wrong. `_gap_ema` is the dangerous one.
+        It is seeded from the first reading so there is no warm-up lag - but
+        "first reading" meant first reading of the PROCESS, not of the heat.
+
+        A trader left running from one heat into the next therefore opened the
+        new heat on the old one's smoothed gap, at whatever size and in
+        whatever direction that said, at tick 1 - when the position is largest
+        and the new heat's news has not been read yet. At GAP_SMOOTHING = 0.10
+        it takes ~22 ticks to forget, which is most of the first week. A heat
+        that ended with a -10 vol-point short view would open the next one
+        short at full size regardless of what the new heat was actually
+        pricing, and be right or wrong by pure luck.
+
+        `overnight.py` hid this: it spawns a FRESH trader per heat, so the
+        whole recorded library is clean. The competition is where it bites -
+        the pre-flight checklist says to start the trader once and let it wait
+        for ACTIVE, and there are ten heats back to back.
+        """
         self._last_tick = -1
         self._target_strike = None
         self._gap_ema = None
@@ -304,24 +329,16 @@ class AutoTrader:
         that even a fully one-sided outcome stays hedgeable, which is precisely
         the guard the RTM52P episode showed to be missing.
 
-        The wing structure raises the at-the-money position by W/2 a leg while
-        the share limit stays at 50,000, so the same straddle target now asks
-        more of the hedge. Discounting the cap by that inflation keeps the
-        guard honest: measured over 124 recordings, the structure already more
-        than doubles the delta penalty ($8,786 to $19,911 a heat), and running
-        out of shares to hedge with is how that becomes unbounded.
+        This guards the STRADDLE only. The extra size the wing structure buys
+        is guarded separately and on its own terms by `structure.hedgeable`,
+        which prices the delta the structure actually adds at today's greeks
+        rather than discounting this cap by a blanket inflation factor - that
+        was tried and is roughly ten times too conservative.
         """
         headroom = config.LIMIT_RTM_GROSS - abs(chain['underlying_position'])
         headroom = max(headroom, 0) + self.delta_limit
         # Worst case a straddle leg pair nets ~1.0 delta per contract pair.
         return max(int(headroom / config.CONTRACT_MULTIPLIER), 0)
-
-    @staticmethod
-    def structure_inflation():
-        """How much bigger the option book is than the straddle alone."""
-        if not structure.WING_CONTRACTS or not config.LIMIT_OPT_NET:
-            return 1.0
-        return 1.0 + structure.WING_CONTRACTS / config.LIMIT_OPT_NET
 
     def pick_strike(self, chain):
         """
@@ -354,7 +371,17 @@ class AutoTrader:
         total = case.get('ticks_per_period') or 300
 
         if case.get('status') != 'ACTIVE':
+            # Between heats. Drop every opinion formed in the last one, so the
+            # next heat is entered on its own evidence. See reset_heat_state.
+            self.reset_heat_state()
             return False
+        if tick < self._last_tick:
+            # A new heat we never saw stop - the poll can fall in the gap
+            # between one heat ending and the next starting. The tick counter
+            # running backwards is the only evidence, and it is enough.
+            self.log(f'  new heat detected (tick {tick} after '
+                     f'{self._last_tick}) - clearing the last heat\'s state')
+            self.reset_heat_state()
         if tick == self._last_tick:
             return True
         self._last_tick = tick
@@ -510,10 +537,6 @@ class AutoTrader:
         if not total or tick < total * STRUCTURE_OFF_AFTER:
             return structure.WING_CONTRACTS
         return 0
-
-    def net_contracts(self, chain):
-        """Signed sum of every option position - what the net limit counts."""
-        return sum(int(row['position']) for row in chain['rows'])
 
     def option_orders(self, chain, desired):
         """
