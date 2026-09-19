@@ -412,8 +412,11 @@ ARB_THRESHOLD_CAD = 0.07
 #   v15_exitbasis - the tender gate prices the exit the tender will actually
 #             take: close-out at the mid past the hold threshold, a market
 #             unwind before it.
-RISK_MODEL = "v15_exitbasis"
-RISK_MODEL_DESC = "v14 plus: gate a held tender against close-out, not a unwind that never runs"
+#   v16_trackersync - an accept updates the cycle's position read, and the
+#             tender tracker is reconciled to the live position so it cannot
+#             ratchet into reaching for the arb's hedge leg.
+RISK_MODEL = "v16_trackersync"
+RISK_MODEL_DESC = "v15 plus: accept folds into pos, and the tender tracker cannot ratchet"
 
 LOOP_SLEEP = 0.5    # between cycles inside a heat (~8 requests per cycle)
 WAIT_POLL = 2.0     # between polls while waiting for the next heat
@@ -770,6 +773,7 @@ class UnwindState:
     def reset(self):
         self.opened = None
         self.peak = 0
+        self.holding = False
 
     def note_size(self, size, cycle):
         """Restart the glide path when a new tender lands on top of the old one."""
@@ -855,6 +859,16 @@ def unwind_ritc(session, pos, book, snap, logs, heat, tick, cycle, st):
         target = min(target, max(ritc, 0))
     elif target < 0:
         target = max(target, min(ritc, 0))
+    # Believe the position, not the tracker. If the clamp bound, RITC moved for
+    # a reason the tracker never saw - the arb's own ETF leg is the only one -
+    # and the inventory it still claims is gone. Left uncorrected the tracker
+    # ratchets: a later arb SELL would take RITC negative again and the stale
+    # claim would let the unwind buy back the arb's hedge leg, which is exactly
+    # the v11 bug. Safe only because `handle_tenders` now folds an accept into
+    # `pos` in the same cycle; before that, `pos` was 90,000 units stale on the
+    # accept cycle and this would have zeroed a tender we had just taken on.
+    if target != tender_position:
+        tender_position = target
     if abs(target) <= UNWIND_THRESHOLD:
         if st.resting.orders:
             st.resting.cancel_all(session, RITC)
@@ -1280,7 +1294,15 @@ def handle_tenders(session, logs, heat, tick, snap, quotes, pos, books):
             if ok:
                 global tender_position
                 q = float(offer.get("quantity") or 0)
-                tender_position += q if (offer.get("action") or "").upper() == "BUY" else -q
+                signed = q if (offer.get("action") or "").upper() == "BUY" else -q
+                tender_position += signed
+                # `pos` was read at the top of the cycle, before this accept, so
+                # without this the unwind and the limit checks spend the rest of
+                # the cycle looking at a book that is 90,000 units out of date -
+                # and `tender_position` would claim inventory the position does
+                # not yet show, which is what the clamp in unwind_ritc would
+                # then wrongly correct away.
+                pos[RITC] = pos.get(RITC, 0) + signed
         except ApiException as e:
             ok, err = False, str(e)[:200]
         accepted += 1 if ok else 0

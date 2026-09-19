@@ -545,6 +545,55 @@ rejection carries a basis tag, when a limit rejection legitimately carries
 neither, and a headline count that was counting log rows rather than distinct
 tenders — each tender is logged once per cycle of its ~6-cycle life.
 
+## `v16_trackersync` — the tender tracker could ratchet
+
+Found by writing the first end-to-end test. `test_cycle.py` drives the real
+`step_once` through a whole 301-tick heat — book fetch, tender poll, gate,
+pre-hedge, accept, arb legs, unwind, pre-hedge unwind, FX hedge — and asserted
+that `tender_position` still agrees with the real RITC position at the end. It
+did not: the tracker read −59,250 against an actual position of −2,000.
+
+**Two defects, one causing the other.**
+
+`pos` is read once at the top of the cycle, *before* `handle_tenders` runs. So
+on the cycle a tender is accepted, `tender_position` includes it and `pos[RITC]`
+does not — the unwind and both limit checks spend the rest of that cycle
+looking at a book 90,000 units out of date. `handle_tenders` now folds the
+accepted quantity into `pos` as well.
+
+With that fixed, the tracker can be reconciled. v11's clamp already refused to
+trade more than the live position holds, but it only clamped the *target* and
+left `tender_position` untouched, so the tracker ratcheted: the arb's ETF leg
+moves RITC without the unwind ever seeing it, and the stale claim survives. A
+later arb SELL then takes RITC negative again and the clamp happily lets the
+unwind buy back **the arb's hedge leg** — which is the v11 bug returning by a
+different route. The clamped value is now written back: believe the position,
+not the tracker.
+
+That write-back is only safe *because* of the first fix. Before it, `pos` was
+90,000 units stale on the accept cycle and reconciling would have zeroed a
+tender we had just taken on.
+
+Neither defect was reachable by the existing tests, which each drive one
+decision against a stub. Both needed the whole cycle running against something
+that keeps its own books.
+
+### Tooling
+
+`test_cycle.py` asserts, over a synthetic heat with tenders on the cadence the
+logs show: no exception escapes any cycle; server limits are never breached;
+tender inventory is worked down before the hold threshold and held after it;
+the pre-hedge fires and does not outlive its position; the tracker agrees with
+the position at the end; nothing is left resting.
+
+Two of its own bugs are worth recording, because both would have made it lie:
+it served the **RITC book for BULL and BEAR**, so the arb saw a 20+ CAD edge
+every cycle and built a 65,000-a-side basket that no real book could produce;
+and two `check` calls printed a failure message on the *pass* path, which reads
+as a contradiction in the output. The first tender in the scenario is now
+deliberately 100,000 units on a flat book — 200,000 of net against a 197,000
+cap — because without it nothing exercised the pre-hedge end to end.
+
 ---
 
 ## Known open items
