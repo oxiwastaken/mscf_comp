@@ -47,8 +47,14 @@ Roll back immediately if ANY of these show up over the next few heats:
 - a single heat with a fine over **$40,000**
 - five heats averaging a fine over **$20,000** (the forecast-IV build ran
   ~$15,000, so anything above that means it is going the wrong way)
-- repeated `CANNOT HEDGE` lines in the trader log — that is the 50,000-share
-  pin, which 4 heats in 120 reach by design
+- **`Limit-ETF` rejections in the trader log** — this is the 50,000-share pin,
+  which 4 heats in 120 reach by design. Note it does NOT print `CANNOT HEDGE`:
+  the trader's own clamp lets the order through and the SERVER refuses it, so
+  `Limit-ETF` is the only evidence. Watching the wrong string cost nine heats
+  of blind monitoring on 19 Sep. Seen once so far, in heat 035620, which still
+  returned $118,577 and recovered on the next tick
+
+    grep -c "Limit-ETF" logs/auto_<tag>.log
 
 The rollback is one line, and it does not need a revert of the whole commit —
 the measurement improvements in it are worth keeping:

@@ -10,6 +10,7 @@ cd "$(dirname "$0")" || exit 1
 
 STALL=900          # seconds without a heat before shouting
 last=$(wc -l < results.csv)
+pinned_log=""
 seen=$(date +%s)
 
 while true; do
@@ -21,6 +22,20 @@ while true; do
         done
         last=$n
         seen=$(date +%s)
+    fi
+
+    # The share-limit pin. It does NOT print "CANNOT HEDGE" - the trader's own
+    # clamp lets the order through and the SERVER refuses it, so the only
+    # evidence is a rejection in the Limit-ETF risk category. Watching the
+    # wrong string meant nine heats went by with the tripwire looking at
+    # nothing. Report once per heat log.
+    newest=$(ls -t logs/auto_*.log 2>/dev/null | head -1)
+    if [ -n "$newest" ] && [ "$newest" != "$pinned_log" ]; then
+        n=$(grep -c "Limit-ETF" "$newest" 2>/dev/null || echo 0)
+        if [ "$n" -gt 0 ]; then
+            echo "ALARM RTM share limit hit $n times in $(basename "$newest") - the hedge was refused"
+            pinned_log="$newest"
+        fi
     fi
 
     if ! tasklist //FI "IMAGENAME eq python.exe" //FO CSV 2>/dev/null | grep -q python.exe; then
