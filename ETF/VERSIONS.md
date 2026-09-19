@@ -981,6 +981,56 @@ check while quietly consuming the gross that tenders need.
 
 ---
 
+## `v22_settlelag` — one stale read could strand a whole tender
+
+**Evidence first.** Ten full v21 heats, decomposed as expected edge (the edge
+of accepted tenders at the moment of acceptance) against realised heat P&L:
+
+| | |
+|---|---|
+| sd of expected edge (what the market offered) | 21,912 |
+| sd of the gap (drift while exiting) | 46,278 |
+| mean gap | **+61** |
+
+The exit is unbiased: on average we bank exactly the edge we take. So nothing on
+the exit side can raise the mean - only more or better tenders can. Sizing what
+was refused despite positive edge:
+
+| refused, positive edge | tenders | per heat |
+|---|---|---|
+| on position limits | 9 | **+13,472** |
+| edge 0.00-0.04, below the bar | 9 | +1,825 combined |
+
+So `MIN_TENDER_EDGE` is not the lever, and the planned bar test was dropped.
+
+**Five of the nine limit refusals were one bug.** Heat 13 accepted SELL 89,000
+at tick 20, and `pos_ritc` then sat at -91,000 for 125 ticks - well before the
+hold threshold - while five later tenders were refused on gross, one at +0.360
+edge on 71,000 units. The heat unwound 3,000 units in total.
+
+The server settles a tender fill about a cycle after the accept, and in between
+`/securities` alternates old and new: -94,000 -> -5,000 -> -94,000. v16 clamps
+the tracker to the live position and writes the clamp back, and that write-back
+can only shrink the tracker, never restore it. One read took it from -89,000 to
+-5,000 permanently; the unwind cleared to its 2,000 threshold (the 3,000) and
+treated the remaining -91,000 as not its business.
+
+v16's own note says the write-back is "safe only because handle_tenders now
+folds an accept into pos in the same cycle". That covers the accept cycle. The
+settlement lag lands on the cycle after. Six transient reads in 55 heats, every
+one straight after an accept.
+
+**Fix.** The reconcile is now a pure function, `reconcile_tracker`, and a
+binding clamp is believed only when it binds on two consecutive reads. The
+first time, the tracker is kept and the unwind skips one cycle. A transient read
+recovers by the next cycle; a real move by the arb persists and is written back
+one cycle later than v16 did, which is the entire cost.
+
+`test_reconcile.py` replays the logged sequences from v21 heats 13 and 10 and
+v17 heat 1, and checks v16's original case - a real arb move - is still shed.
+Run against the old logic, heat 13's sequence gives
+`[-89000, -5000, -5000, -5000, -5000]`: stranded, as observed live.
+
 ## Known open items
 
 - ~~`basket_rich` is negative (−0.0218/unit over 8 arbs)~~ — **RETRACTED.**

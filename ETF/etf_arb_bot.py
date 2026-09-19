@@ -515,8 +515,8 @@ ARB_THRESHOLD_CAD = 0.07
 #   v21_grossreserve - the arb may only use gross that no tender needs. It was
 #             net-neutral and invisible to every net check while holding 224,000
 #             of gross and refusing 40,119 USD of tenders in one heat.
-RISK_MODEL = "v21_grossreserve"
-RISK_MODEL_DESC = "v20 plus: 200,000 of gross reserved for tenders, arb capped at 97,000"
+RISK_MODEL = "v22_settlelag"
+RISK_MODEL_DESC = "v21 plus: tracker clamp confirmed over two reads, so settlement lag cannot strand a tender"
 
 LOOP_SLEEP = 0.5    # between cycles inside a heat (~8 requests per cycle)
 WAIT_POLL = 2.0     # between polls while waiting for the next heat
@@ -869,6 +869,7 @@ class UnwindState:
         self.passive_qty = 0.0
         self.aggressive_qty = 0.0
         self.holding = False    # latched so the hold prints once, not every cycle
+        self.clamp_bound = False  # the tracker clamp bound on the previous cycle
 
     def reset(self):
         self.opened = None
@@ -913,6 +914,46 @@ def passive_price(action, bid, ask):
         return round(ask if px >= ask else px, 2)
     px = ask - PRICE_TICK
     return round(bid if px <= bid else px, 2)
+
+
+def reconcile_tracker(tracker, ritc, clamp_bound):
+    """Reconcile the tender tracker against the live RITC position.
+
+    Returns (target, tracker, clamp_bound, skip). `target` is what the unwind
+    should work toward this cycle; `skip` means sit this cycle out.
+
+    v16 clamps the tracker to the live position and writes the clamp back, so
+    inventory the arb's ETF leg moved without the unwind seeing it cannot linger
+    and later let the unwind buy back the arb's hedge. That write-back can only
+    SHRINK the tracker, never restore it - so it must not act on a stale read.
+
+    The server settles a tender fill about one cycle after the accept, and in
+    between /securities alternates between the old and new position: 6
+    transient reads across 55 heats, every one straight after an accept. v16's
+    own safety note covers the accept cycle (handle_tenders folds the accept
+    into `pos`) but not the settlement cycle after it. In v21 heat 13 one such
+    read (-94,000 -> -5,000 -> -94,000) shrank the tracker from -89,000 to
+    -5,000 for good. The unwind cleared 3,000 units to its threshold and left
+    -91,000 stranded for 125 ticks, and five profitable tenders - one at +0.360
+    edge on 71,000 units - were refused on gross. Limit refusals are worth
+    ~13,500 USD/heat across the v21 sample; this is the preventable part.
+
+    So a binding clamp is believed only when it binds on two consecutive reads.
+    The first time, the tracker is kept and the unwind skips one cycle. A
+    transient read recovers by the next cycle and the tracker survives intact; a
+    real move by the arb persists and is written back one cycle later than v16
+    would, which is the whole cost.
+    """
+    target = tracker
+    if target > 0:
+        target = min(target, max(ritc, 0))
+    elif target < 0:
+        target = max(target, min(ritc, 0))
+    if target == tracker:
+        return target, tracker, False, False
+    if not clamp_bound:
+        return tracker, tracker, True, True
+    return target, target, True, False
 
 
 def unwind_ritc(session, pos, book, snap, logs, heat, tick, cycle, st):
@@ -960,13 +1001,13 @@ def unwind_ritc(session, pos, book, snap, logs, heat, tick, cycle, st):
               f"(rested {order['price']:.2f}, rebate +{filled * REBATE_LMT:,.0f})")
 
     # Only tender-derived inventory is unwound. Clamp to the live position so a
-    # stale tracker can never drive trades in the wrong direction.
+    # stale tracker can never drive trades in the wrong direction - but only
+    # believe a clamp that holds for two reads in a row (see reconcile_tracker).
     ritc = int(pos.get(RITC, 0))
-    target = tender_position
-    if target > 0:
-        target = min(target, max(ritc, 0))
-    elif target < 0:
-        target = max(target, min(ritc, 0))
+    target, tender_position, st.clamp_bound, skip = reconcile_tracker(
+        tender_position, ritc, st.clamp_bound)
+    if skip:
+        return None, 0
     # Believe the position, not the tracker. If the clamp bound, RITC moved for
     # a reason the tracker never saw - the arb's own ETF leg is the only one -
     # and the inventory it still claims is gone. Left uncorrected the tracker
@@ -975,8 +1016,6 @@ def unwind_ritc(session, pos, book, snap, logs, heat, tick, cycle, st):
     # the v11 bug. Safe only because `handle_tenders` now folds an accept into
     # `pos` in the same cycle; before that, `pos` was 90,000 units stale on the
     # accept cycle and this would have zeroed a tender we had just taken on.
-    if target != tender_position:
-        tender_position = target
     if abs(target) <= UNWIND_THRESHOLD:
         if st.resting.orders:
             st.resting.cancel_all(session, RITC)
