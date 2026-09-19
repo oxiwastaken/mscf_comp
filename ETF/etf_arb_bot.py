@@ -392,25 +392,36 @@ PASSIVE_REPRICE_TICKS = 1
 #     all later    3.50   3.11   2.62    1.89    1.70    0.96    0.48    0.03
 #     same-dir     2.04   1.75   1.62    1.04    0.91    0.46    0.34    0.00
 #
-# `sweep_holdtick.py` turns that into expected value per heat. The central
-# estimate peaks at 150 (+6,629) with 175 (+6,300) and 200 (+5,666) behind it -
-# a flat curve, so the choice is decided by robustness rather than by the peak.
+# `sweep_holdtick.py` turns that into expected value per heat. What holding
+# SAVES is the unwind cost it avoids, and close-out was proven exact live - a
+# v17 heat that held everything expected +24,430 USD and returned +24,913 CAD,
+# a 0.02% match - so the saving is exactly that cost and nothing more.
 #
-# The cost side depends on what a captured tender is worth, which is a median
-# over 32 noisy observations. Sweeping that from 4,000 to 20,000 USD moves the
-# argmax from 90 all the way to 225, so the point estimate cannot be trusted on
-# its own. Worst-case regret across that whole range:
+# That cost depends on the unwind regime, which is what moved this constant:
 #
-#     threshold    0      60      90     120    150    175    200    225
-#     regret    92,125  45,441  25,139  14,640  3,706  3,732  5,278  8,092
+#     aggressive (v5-v11)    execution 0.0420 + fee 0.0200 = 0.0620/unit
+#     passive    (v14 live)  execution 0.0229 + fee 0.0020 = 0.0249/unit
 #
-# 150 and 175 are tied (26 USD/heat apart) and both clearly beat 200. The
-# tiebreak is the one thing the sweep deliberately does not price: drift.
-# Holding is mean-zero (-0.0126/unit against a 0.0779 sd) so it cannot move the
-# argmax, but it does widen heat P&L, and 175 holds 1.79 tenders/heat for up to
-# 125 ticks against 150's 2.28 for up to 150. Same expected value, less
-# variance - so 175.
-HOLD_TO_CLOSEOUT_TICK = 175
+# v17 set this to 175 using the chunk_vwap uplift (0.0612) as the saving. That
+# matches the aggressive regime almost exactly, and it was the only figure
+# available before v12 had run live - but v12's passive layer more than halved
+# the unwind cost, and a cheaper unwind makes HOLDING WORTH LESS, not more.
+# At 0.0249 the sweep ranks 175 at -305 USD/heat: mildly value-destroying,
+# because it still blocks later tenders while saving almost nothing.
+#
+# Both inputs are uncertain - the unwind cost is 8 tenders of the current
+# regime (se ~0.011) and the value of a captured tender is a median over ~40 -
+# so the choice is made on worst-case regret over BOTH axes rather than on
+# either point estimate:
+#
+#     threshold     0     60     90    120    150    175    200    225
+#     regret  130,603 70,204 44,105 27,957 10,711  7,373  4,405  5,866
+#
+# 200 it is, which is where v14 originally put it. If PASSIVE_MAX_LIVE = 2
+# raises the passive share further, the unwind gets cheaper again and this
+# should move later still - re-run sweep_holdtick.py after the next heat that
+# actually unwinds.
+HOLD_TO_CLOSEOUT_TICK = 200
 
 # --- tender pre-hedge ----------------------------------------------------
 # The largest tenders do not fit the net limit even on a completely flat book.
@@ -471,8 +482,11 @@ ARB_THRESHOLD_CAD = 0.07
 #   v19_barmeasured - MIN_TENDER_EDGE 0.08 -> 0.04 on a break-even measured
 #             two independent ways (+0.0138, se 0.0058) rather than reasoned
 #             about; the old bar sat 11 se above it.
-RISK_MODEL = "v19_barmeasured"
-RISK_MODEL_DESC = "v18 plus: tender bar 0.04, set from a measured break-even of 0.0138"
+#   v20_holdrevised - HOLD_TO_CLOSEOUT_TICK 175 -> 200. v12 halved the unwind
+#             cost, so holding saves 0.0249/unit instead of 0.0620 and is worth
+#             less, not more.
+RISK_MODEL = "v20_holdrevised"
+RISK_MODEL_DESC = "v19 plus: hold threshold back to 200 on a measured unwind cost"
 
 LOOP_SLEEP = 0.5    # between cycles inside a heat (~8 requests per cycle)
 WAIT_POLL = 2.0     # between polls while waiting for the next heat

@@ -3,9 +3,22 @@
 Holding a tender to close-out saves its execution cost outright. It costs the
 tenders it then blocks. Both sides are measurable from the logs:
 
-  SAVED   the uplift from exiting at close-out (the mid, no fee) instead of
-          through a market unwind, measured per tender from the logged
-          `chunk_vwap` - mean +0.0626/unit across 385 observations
+  SAVED   the unwind cost that holding avoids. Close-out was proven exact live
+          (a v17 heat that held everything expected +24,430 USD and returned
+          +24,913 CAD, a 0.02% match), so the saving is exactly the unwind cost:
+
+              execution (fill vs contemporaneous mid) + net fee
+
+          and BOTH terms depend on the unwind regime, which is why this is now
+          a parameter instead of a constant:
+
+              aggressive (v5-v11)   0.0420 + 0.0200 = 0.0620/unit
+              passive    (v14 live) 0.0229 + 0.0020 = 0.0249/unit
+
+          The first version of this used the `chunk_vwap` uplift, +0.0612/unit.
+          That happens to match the aggressive regime almost exactly and
+          overstates the passive one by 2.5x - because v12 made unwinding
+          cheaper, which makes holding worth LESS, not more.
 
   BLOCKED only LATER tenders in the same heat that clear the bar AND run the
           same direction. An opposite-direction tender still fits - it reduces
@@ -31,8 +44,16 @@ import statistics
 import sys
 from collections import defaultdict
 
-BAR = 0.08          # MIN_TENDER_EDGE, the bar a later tender must clear
+BAR = 0.04          # MIN_TENDER_EDGE, the bar a later tender must clear
 CANDIDATES = [0, 60, 90, 120, 150, 175, 200, 225, 250, 301]
+
+# What holding saves, per unit = the unwind cost it avoids. Regime-dependent:
+# measure it with decompose_unwind.py and set this, do NOT use the chunk_vwap
+# uplift as a proxy - that only matches an all-market-order unwind.
+UNWIND_COST = {
+    "passive":    0.0229 + 0.0020,   # v14 live, ~60% passive fill share
+    "aggressive": 0.0420 + 0.0200,   # v10, all market orders
+}
 
 
 def load_heats():
@@ -68,7 +89,7 @@ def load_heats():
             "tick": min(int(x["tick"]) for x in rows),
             "act": rows[0]["action"], "qty": float(rows[0]["quantity"]),
             "best": max(edges),
-            "uplift": statistics.mean(ups) if ups else None,
+            "uplift": statistics.mean(ups) if ups else None,   # kept for reference only
         })
     pooled = statistics.mean(uplifts) if uplifts else 0.0626
     for ts in heats.values():
@@ -91,6 +112,10 @@ def captured_value():
 
 
 def main():
+    regime = sys.argv[1] if len(sys.argv) > 1 else "passive"
+    if regime not in UNWIND_COST:
+        print(f"usage: python sweep_holdtick.py [{'|'.join(UNWIND_COST)}]")
+        return 1
     heats, pooled = load_heats()
     if not heats:
         print("no tender history")
@@ -108,6 +133,7 @@ def main():
     print(f"{'threshold':>10}{'held/heat':>11}{'saved/heat':>12}"
           f"{'blocked/heat':>14}{'cost/heat':>11}{'NET/heat':>11}")
     best = None
+    cost = UNWIND_COST[regime]
     for T in CANDIDATES:
         saved = blocked = held = 0.0
         for ts in heats.values():
@@ -115,7 +141,7 @@ def main():
                 if t["tick"] < T:
                     continue
                 held += 1
-                saved += t["uplift"] * t["qty"]
+                saved += cost * t["qty"]
                 # Only later, same-direction tenders over the bar are blocked.
                 blocked += sum(1 for x in ts[i + 1:]
                                if x["best"] >= BAR and x["act"] == t["act"])
@@ -146,7 +172,7 @@ def main():
                 for i, t in enumerate(ts):
                     if t["tick"] < T:
                         continue
-                    saved += t["uplift"] * t["qty"]
+                    saved += cost * t["qty"]
                     blocked += sum(1 for x in ts[i + 1:]
                                    if x["best"] >= BAR and x["act"] == t["act"])
             net = (saved - blocked * pv) / n_heats
@@ -156,6 +182,39 @@ def main():
         table[pv] = (row, top)
         argmax = cands[row.index(max(row))]
         print(f"{pv:>12,} " + "".join(f"{v:>9,.0f}" for v in row) + f"   {argmax}")
+
+    # Two inputs are uncertain, not one. `per_tender` is a median over ~40
+    # noisy tenders; the unwind cost is measured on 8 tenders of the current
+    # regime (se ~0.011) and would be 0.0620 if the passive layer stopped
+    # filling. Regret over BOTH, because a threshold robust along only one axis
+    # is not robust.
+    print()
+    print("2-D regret over unwind cost x captured-tender value:")
+    costs = [0.0150, 0.0249, 0.0400, 0.0620]
+    regret2 = {T: 0.0 for T in cands}
+    for c in costs:
+        for pv in grid:
+            row = []
+            for T in cands:
+                saved = blocked = 0.0
+                for ts in heats.values():
+                    for idx, t in enumerate(ts):
+                        if t["tick"] < T:
+                            continue
+                        saved += c * t["qty"]
+                        blocked += sum(1 for x in ts[idx + 1:]
+                                       if x["best"] >= BAR and x["act"] == t["act"])
+                row.append((saved - blocked * pv) / n_heats)
+            top = max(row)
+            for j, T in enumerate(cands):
+                regret2[T] = max(regret2[T], top - row[j])
+    print(f"  costs swept: {', '.join(f'{c:.4f}' for c in costs)}"
+          "   (0.0249 = passive live, 0.0620 = all-market)")
+    print(f"{'threshold':>10}{'worst regret (2-D)':>22}")
+    for T in cands:
+        print(f"{T:>10}{regret2[T]:>22,.0f}")
+    pick2 = min(regret2, key=regret2.get)
+    print(f"  minimax-regret over BOTH axes: {pick2} ({regret2[pick2]:,.0f} USD/heat)")
 
     print(f"\n{'threshold':>10}{'worst regret vs that row max':>32}")
     regrets = {}

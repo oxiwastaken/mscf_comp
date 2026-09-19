@@ -843,6 +843,69 @@ Nothing was unwound, so there was nothing to fill passively. The
 `PASSIVE_MAX_LIVE = 2` change from v18 has not yet been tested by a heat that
 actually unwinds.
 
+## `v20_holdrevised` - a cheaper unwind makes holding worth less
+
+**This retracts v17's threshold and puts it back where v14 had it.** The reason
+only became measurable once v12 ran live.
+
+What holding saves is the unwind cost it avoids - no more, now that close-out
+is proven *exact* rather than merely fair. That cost is regime-dependent:
+
+| regime | execution (fill vs mid) | net fee | holding saves |
+|--------|-------------------------|---------|---------------|
+| aggressive (v5-v11) | 0.0420 | +0.0200 | **0.0620/unit** |
+| passive (v14 live, ~60% fill) | 0.0229 | +0.0020 | **0.0249/unit** |
+
+v17 used the `chunk_vwap` uplift, +0.0612/unit, as the saving. That matches the
+aggressive regime almost exactly and was the only figure available before v12
+had run - but **v12's passive layer more than halved the unwind cost, and a
+cheaper unwind makes holding worth less, not more.** At 0.0249 the sweep ranks
+175 at **-305 USD/heat**: mildly value-destroying, still blocking later tenders
+while saving almost nothing.
+
+This is the opposite of what the "close-out is exact" result first suggested.
+Exactness confirms the saving is the *full* unwind cost with no haircut - but
+that full cost had itself collapsed, and the second effect is much larger.
+
+Both inputs are uncertain - the unwind cost is 8 tenders of the current regime
+(se ~0.011), the value of a captured tender a median over ~40 - so the choice
+is worst-case regret over **both** axes rather than either point estimate:
+
+| threshold | 0 | 60 | 90 | 120 | 150 | 175 | 200 | 225 |
+|-----------|---|----|----|-----|-----|-----|-----|-----|
+| regret | 130,603 | 70,204 | 44,105 | 27,957 | 10,711 | 7,373 | **4,405** | 5,866 |
+
+On the single-axis sweep 225 wins (regret 628). Over both it is 200, because
+225 is exposed if the passive layer ever stops filling and the unwind reverts
+to costing 0.0620.
+
+`sweep_holdtick.py` now takes the regime as an argument and reads the saving
+from a measured `UNWIND_COST` table rather than a `chunk_vwap` proxy. If
+`PASSIVE_MAX_LIVE = 2` raises the passive share further, the unwind gets
+cheaper again and this should move later still - re-run it after the next heat
+that actually unwinds.
+
+### Why the tender bar was NOT moved again
+
+The same logic suggests break-even should have fallen too: at a 0.0249 unwind
+cost the structural break-even on the gate basis is about **-0.036**. But the
+direct estimator disagrees - over the 9 passive-era tenders it reads **+0.0335
+(se 0.0434)** - and `sweep_tenderbar.py` exists partly to refuse a bar change
+when its two estimators diverge. They diverge by 0.07 here, on n=9.
+
+So `MIN_TENDER_EDGE` stays at the 0.04 set in v19 from the aggressive-era
+break-even of +0.0138. If the structural view is right, 0.04 is simply more
+conservative than intended, which is safe. Re-derive once the passive era has
+30+ tenders.
+
+**Methodological note for the next person:** v19's `sweep_tenderbar.py` pooled
+execution across v5-v11 (all market orders) to set a bar for a passive unwind.
+That breaks this file's own opening rule - rows produced under different
+formulas must never be averaged. The 0.04 it produced survives because it errs
+conservative, but the method was wrong and the tool should segment by regime.
+
+---
+
 ## Known open items
 
 - ~~`basket_rich` is negative (−0.0218/unit over 8 arbs)~~ — **RETRACTED.**
