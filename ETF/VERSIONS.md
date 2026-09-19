@@ -734,6 +734,41 @@ Neither the hold nor the pre-hedge has fired yet, so `HOLD_TO_CLOSEOUT_TICK`,
 "close-out is benign" question - the one the checklist calls most important,
 because v14 and v15 both rest on it - is still open.
 
+## Live validation: close-out is exact, not merely benign
+
+The checklist called "close-out is benign" the most important open question,
+because v14 and v15 both rest on it. A v17 heat has now answered it directly.
+
+The heat opened at tick 181, past `HOLD_TO_CLOSEOUT_TICK = 175`, so every
+tender was held and **no unwind ran at all**:
+
+    HOLD -97,000 RITC to close-out (tick 201 >= 175) - saves ~7,275 of execution
+
+    accepted  SELL 97,000 @ 25.32  edge +0.0700  ->  +6,790 USD
+    accepted  BUY  98,000 @ 25.28  edge +0.1800  -> +17,640 USD
+    expected edge                                   +24,430 USD  (~24,919 CAD)
+
+    unwind fills: 0
+    heat P&L:     +24,913 CAD
+
+A 0.02% match. Close-out pays the correct price, charges nothing, and has no
+impact, exactly as the case PDF states. Held inventory captures **100% of gate
+edge**, against the 2-7% that the unwind gives back even at its best. v14 and
+v15 stand, and `MIN_TENDER_EDGE_HELD` does not need to rise.
+
+This raises a question the heat cannot answer: if close-out is free and exact,
+the only thing unwinding ever buys is capacity for later tenders, so
+`HOLD_TO_CLOSEOUT_TICK` may be too late. This heat is not evidence either way -
+it began at tick 181, so no later tender could have arrived to be blocked. The
+sweep that chose 175 assumed close-out was approximately fair; it is exactly
+fair, which shifts the trade in favour of holding earlier. Worth re-running
+sweep_holdtick.py with a zero-cost close-out before moving the constant.
+
+**`passive_share` reads 0.0 on these heats, which is correct, not a regression.**
+Nothing was unwound, so there was nothing to fill passively. The
+`PASSIVE_MAX_LIVE = 2` change from v18 has not yet been tested by a heat that
+actually unwinds.
+
 ## Known open items
 
 - ~~`basket_rich` is negative (−0.0218/unit over 8 arbs)~~ — **RETRACTED.**
