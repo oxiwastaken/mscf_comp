@@ -31,7 +31,10 @@ while true; do
     # nothing. Report once per heat log.
     newest=$(ls -t logs/auto_*.log 2>/dev/null | head -1)
     if [ -n "$newest" ] && [ "$newest" != "$pinned_log" ]; then
-        n=$(grep -c "Limit-ETF" "$newest" 2>/dev/null || echo 0)
+        # grep -c exits NON-ZERO when the count is zero, so `|| echo 0`
+        # appends a second zero and the comparison below dies with
+        # "integer expression expected". Assign, then correct on failure.
+        n=$(grep -c "Limit-ETF" "$newest" 2>/dev/null) || n=0
         if [ "$n" -gt 0 ]; then
             echo "ALARM RTM share limit hit $n times in $(basename "$newest") - the hedge was refused"
             pinned_log="$newest"
