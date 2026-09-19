@@ -1237,6 +1237,85 @@ against. `test_hold_gate`'s uplift check asserted v15's exact +0.0626 from 385
 books; on today's 3,169 it is +0.0715, so it now checks what v15 rests on - that
 the uplift is materially positive - rather than a figure that moves with the data.
 
+## `v28_nodoubledown` - charge more to double down
+
+**The tail is made by size, and size is made by doubling down.** The worst heat
+on record, -161,676:
+
+    tick 205   ritc  -83,000   net -136,000    mid 24.47
+    tick 245   ritc -112,000   net -194,000    mid 24.81
+    tick 295   ritc -112,000   net -194,000    mid 25.42   NLV -142,864
+
+Short 112,000 RITC at the net cap while the mid rose 1.12. That is ~125,000 of
+the loss. Not execution, not a bug - a directional bet that went the wrong way.
+
+Since v27 every tender is carried to close-out, so a heat is the edge captured
+minus however far the ETF drifts while it is held. On ~90,000 units the edge is
+~10,000 and a heat's drift is worth several times that, so position size is the
+whole risk.
+
+`BAR_ADD_SAME_WAY = 0.04` demands 0.04/unit more from a tender that adds to
+inventory we already hold. Measured on `tender_position`, not raw RITC - the
+arb's ETF leg is hedged by its own BULL/BEAR and carries no directional risk
+(v11). A tender in the **opposite** direction is deliberately left alone: it is
+the only way exposure ever comes off without paying execution, since it
+flattens the book and pays us for doing it.
+
+Replayed over 105 full heats against live v27:
+
+| | v27 | v28 |
+|---|---|---|
+| expected shortfall, worst 5% | -87,600 | **-74,836** |
+| worst heat | -110,945 | **-92,638** |
+| losing heats | 22/105 | **20/105** |
+| mean | 63,172 | 66,986 (t +1.62) |
+
+**The mean gain is claimed as zero.** 75% of it comes from three heats and it
+disappears at a 0.10 held bar. The ES5 improvement is what is being bought, and
+that held in all nine `exec_cost` x `dump_cost` combinations tried and at held
+bars 0.06 and 0.08; losing heats never got worse in any of them. It costs
+nothing to operate - it is a threshold, not a trade.
+
+### Six alternatives tested and rejected
+
+| idea | result |
+|---|---|
+| **net cap** | degenerate. Tenders are 70,000-100,000 units, so any cap below 140,000 of net takes nothing at all |
+| **loss stop** | losing heats **22 -> 50**. Drift is mean-zero, so a stop converts recoverable mark-to-market dips into realised losses and truncates the recovery with them |
+| **basket hedge** | at the **measured** cost it halves the mean, -31,130 (t -9.60), and raises losing heats to 25 |
+| **held bar tuning** | flat between 0.06 and 0.10; v27 already sits at the robust middle |
+| **swap off** | -8,931 (t -3.87), and a slightly worse tail. Keep it |
+| **time-scaled bar** | charging for holding time moved ES5 erratically and made the worst heat worse (-118,657, -160,415) |
+
+**The basket hedge deserves its own note, because it looked like the answer.**
+At an assumed 0.02-0.03/share/leg it cut the worst heat from -110,945 to
+-47,832 and losing heats from 22 to 14. Then the cost was measured rather than
+assumed: **1,474 live BULL/BEAR fills average 0.0560 against the mid, plus the
+0.02 fee = 0.0760/share/leg**, two to four times what was assumed. At the
+measured figure the hedge is strictly bad. This is the fourth time on this case
+that a change looked good on an assumed execution cost and reversed on a
+measured one - v8/v9's per-chunk slippage, v12's passive fill share, v20's
+unwind cost, and now this.
+
+**What this does not do.** It reduces the tail; it does not remove it. A
+-92,638 heat is still possible, and no policy tested removes that while holding
+a 97,000-unit position for 300 ticks - the drift on that position is simply
+larger than the edge on it. Eliminating it would mean not taking full-size
+tenders, which costs far more than the tail does.
+
+`test_holdall.py` covers the rule in both directions, that the opposite side is
+never penalised, that it is symmetric, that a large enough edge still clears
+the raised bar, and that a flat book is unaffected.
+
+### Also
+
+`replay_tenders.py` gains `stop_loss`, `hedge_above`, `bar_add`, `bar_reduce`
+and `bar_time` as policy options, all defaulting to inert and each asserted to
+reproduce the baseline exactly when off, so the rejected experiments above can
+be re-run rather than re-argued.
+
+---
+
 ## Known open items
 
 - **Latent tracker mismatch under swap-heavy sequences.** With the unwind path

@@ -201,6 +201,15 @@ class Policy:
     dump_cost: float = 0.10       # per unit vs mid for an immediate market dump
     hedge_frac: float = 0.0       # share of HELD RITC hedged with BULL + BEAR
     basket_cost: float = 0.03     # per share per leg to put the hedge on
+    hedge_above: float = 0.0      # only hedge inventory BEYOND this many units;
+                                  # 0 reproduces the flat proportional hedge
+    stop_loss: float = 0.0        # CAD drawdown that flattens the book and stops
+                                  # taking tenders for the heat; 0 disables
+    bar_add: float = 0.0          # extra edge demanded of a tender that ADDS to
+                                  # existing same-direction exposure; 0 disables
+    bar_reduce: float = 0.0       # edge discount for a tender that REDUCES it
+    bar_time: float = 0.0         # extra edge demanded in proportion to how long
+                                  # the position will be carried; 0 disables
     gross_cap: float = 297_000    # server gross 300,000 less the buffer
 
 
@@ -220,8 +229,32 @@ def fits(position, signed, basket, pol):
     return abs(net) <= pol.net_cap and gross <= pol.gross_cap
 
 
-def passes_gate(o, position, pol, basket=0.0):
+def directional_bar(o, position, pol):
+    """Bar adjusted for what this tender does to existing exposure.
+
+    A tender in the opposite direction to inventory we already hold is
+    risk-reducing: it flattens the position AND pays us to do it, which is the
+    only way exposure comes off without paying execution. One in the same
+    direction doubles down, and it is the doubling down that makes the tail.
+    Neither adjustment costs anything to operate - it is the same gate.
+    """
     edge, bar = tender_edge(o, pol)
+    # Held inventory is carried to close-out, so a tender taken at tick 20 wears
+    # 280 ticks of drift and one taken at tick 250 wears 50. Drift is mean-zero,
+    # so this cannot raise the mean - it charges for the variance the position
+    # will actually carry.
+    if pol.bar_time:
+        bar += pol.bar_time * (LAST_TICK - o.tick) / LAST_TICK
+    if not (pol.bar_add or pol.bar_reduce) or not position:
+        return edge, bar
+    signed = -o.qty if o.action == "SELL" else o.qty
+    if signed * position > 0:
+        return edge, bar + pol.bar_add
+    return edge, max(bar - pol.bar_reduce, 0.0)
+
+
+def passes_gate(o, position, pol, basket=0.0):
+    edge, bar = directional_bar(o, position, pol)
     return edge >= bar and fits(position, -o.qty if o.action == "SELL" else o.qty, basket, pol)
 
 
@@ -236,6 +269,7 @@ def simulate(heat, pol, flicker=frozenset(), forced=None):
         by_tick[o.tick].append(o)
 
     cad = position = stranded = basket = 0.0
+    stopped = False
     glide_tick, glide_from = None, 0.0
     taken, mid, fx, nav = {}, None, None, None
     for t in range(LAST_TICK + 1):
@@ -255,26 +289,52 @@ def simulate(heat, pol, flicker=frozenset(), forced=None):
                 cad -= trade * fill * rate
                 position += trade
 
+        # Loss stop. Marked P&L is cash plus the book at the current mid; if
+        # it breaches, flatten at market and take nothing more this heat. The
+        # flatten pays the same exec_cost an unwind would, so this is not free
+        # - and because drift is mean-zero it cannot raise the mean. It exists
+        # only to truncate the left tail.
+        if pol.stop_loss and mid and not stopped:
+            marked = cad + position * mid * rate + (basket * nav if nav else 0.0)
+            if marked < -pol.stop_loss:
+                if position:
+                    fill = mid + pol.exec_cost if position < 0 else mid - pol.exec_cost
+                    cad += position * fill * rate
+                    position = 0.0
+                if basket and nav:
+                    cad += basket * nav - abs(basket) * 2 * pol.basket_cost
+                    basket = 0.0
+                stopped = True
+                glide_tick, glide_from = None, 0.0
+
         # Hedge HELD inventory with the basket. Close-out prices BULL and BEAR
         # too, so the hedge costs only its entry; what is left is the RITC-NAV
         # gap rather than the whole NAV (and the FX that moves it).
         if pol.hedge_frac and nav and t >= pol.hold_tick:
             room = max(pol.gross_cap - 2 * abs(position), 0) / 2
-            want = max(-room, min(room, -pol.hedge_frac * position))
+            # Only the inventory beyond `hedge_above` is hedged. A flat
+            # proportional hedge pays its entry cost on every position,
+            # including the small ones that were never the problem; the tail
+            # is made by the big ones.
+            target = abs(position)
+            if pol.hedge_above:
+                target = max(target - pol.hedge_above, 0.0)
+            want = pol.hedge_frac * target
+            want = max(-room, min(room, -want if position > 0 else want))
             if abs(want - basket) >= 5_000:
                 d = want - basket
                 cad -= d * nav + abs(d) * 2 * pol.basket_cost
                 basket = want
 
         for o in by_tick.get(t, ()):
-            if o.tid in taken:
+            if o.tid in taken or stopped:
                 continue
             signed = -o.qty if o.action == "SELL" else o.qty
             if forced is not None:
                 if forced.get(o.tid) != t:
                     continue
             else:
-                edge, bar = tender_edge(o, pol)
+                edge, bar = directional_bar(o, position, pol)
                 if edge < bar:
                     continue
                 if not fits(position, signed, basket, pol):

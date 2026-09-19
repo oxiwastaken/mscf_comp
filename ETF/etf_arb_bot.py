@@ -288,6 +288,39 @@ MIN_TENDER_EDGE = 0.04
 # The replay plateau is 0.06-0.10 (0.12 falls off); 0.08 is its middle, chosen
 # for robustness rather than the peak, as v17's hold threshold was.
 MIN_TENDER_EDGE_HELD = 0.08
+# Extra edge demanded of a tender that adds to same-direction inventory.
+#
+# A tail control, not a mean improvement - claimed as neither more nor less.
+# Replayed over 105 full heats against the live v27 policy:
+#
+#     expected shortfall (worst 5%)   -87,600 -> -74,836
+#     worst heat                     -110,945 -> -92,638
+#     losing heats                     22/105 -> 20/105
+#     mean                             +3,814 (t +1.62 - NOT significant)
+#
+# The ES5 improvement holds in all nine exec_cost x dump_cost combinations
+# tried and at held bars 0.06 and 0.08; losing heats never got worse in any of
+# them. The mean gain does not survive scrutiny - 75% of it comes from three
+# heats and it vanishes at a 0.10 held bar - so it is treated as zero.
+#
+# It costs nothing to operate: it is a threshold, not a trade.
+#
+# Six alternatives were tested and rejected, all on the same 105 heats:
+#   net cap            degenerate - tenders are 70-100k units, so any cap below
+#                      140,000 of net takes nothing at all
+#   loss stop          losing heats 22 -> 50. Drift is mean-zero, so a stop
+#                      turns recoverable mark-to-market dips into realised
+#                      losses and truncates the recovery with them
+#   basket hedge       at the MEASURED 0.0760/share/leg (1,474 live BULL/BEAR
+#                      fills) it halves the mean, -31,130 (t -9.60), and still
+#                      raises losing heats to 25. It only looks good at the
+#                      0.02-0.03 that was assumed, which no fill supports
+#   held bar tuning    flat between 0.06 and 0.10; v27 already sits at the
+#                      robust middle
+#   swap off           -8,931 (t -3.87) and a slightly worse tail. Keep it
+#   time-scaled bar    charge for holding time: ES5 moved erratically and the
+#                      worst heat got worse (-118,657, -160,415)
+BAR_ADD_SAME_WAY = 0.04
 # Guards the threshold comparison against float noise. Without it an edge of
 # 0.09999999 printed as "+0.1000 < 0.1" and declined an 84,000-unit tender
 # worth ~8,400 USD over a rounding artefact.
@@ -579,8 +612,10 @@ ARB_THRESHOLD_CAD = 0.07
 #   v21_grossreserve - the arb may only use gross that no tender needs. It was
 #             net-neutral and invisible to every net check while holding 224,000
 #             of gross and refusing 40,119 USD of tenders in one heat.
-RISK_MODEL = "v27_holdall"
-RISK_MODEL_DESC = "hold every tender to close-out (unwind costs 3x what was assumed); bar 0.08 vs mid"
+#   v28_nodoubledown - a tender that adds to same-direction inventory must
+#             clear a bar 0.04 higher. Tail control; the mean is neutral.
+RISK_MODEL = "v28_nodoubledown"
+RISK_MODEL_DESC = "v27 plus: doubling down on held inventory costs 0.04 more edge"
 
 LOOP_SLEEP = 0.5    # between cycles inside a heat (~8 requests per cycle)
 WAIT_POLL = 2.0     # between polls while waiting for the next heat
@@ -1317,6 +1352,26 @@ def tender_safety(offer, pos, book, usd_bid, usd_ask, tick=0):
         # Unwind pays the market fee per unit; tender itself is fee-free.
         edge -= FEE_MKT
         bar, basis = MIN_TENDER_EDGE, "unwind"
+
+    # Charge more for a tender that DOUBLES DOWN on inventory we already hold.
+    #
+    # Since v27 every tender is carried to close-out, so what a heat makes is
+    # the edge captured minus however far the ETF drifts while we hold it. On
+    # ~90,000 units the edge is ~10,000 and a heat's drift is worth several
+    # times that, so the tail is made by size, and size is made by taking a
+    # second tender the same way as the first.
+    #
+    # Measured on `tender_position`, not raw RITC: the arb's ETF leg is hedged
+    # by its own BULL/BEAR and carries no directional risk (v11).
+    #
+    # A tender in the OPPOSITE direction is left alone. It is the only way
+    # exposure ever comes off without paying execution - it flattens the book
+    # and pays us for doing it - so the bar for those must not rise.
+    if BAR_ADD_SAME_WAY and tender_position:
+        signed = -qty if action == "SELL" else qty
+        if signed * tender_position > 0:
+            bar += BAR_ADD_SAME_WAY
+            basis += "+sameway"
 
     if edge < bar - EDGE_EPSILON:
         return False, f"edge {edge:+.5f} < {bar} ({basis})", edge
