@@ -147,14 +147,22 @@ h = vol_engine.hedge_suggestion(1000)
 check('inside the band suggests nothing', h['action'] is None)
 check('inside the band accrues no penalty', close(h['penalty_per_second'], 0.0))
 
-h = vol_engine.hedge_suggestion(6000)
+# Sized against the configured band rather than a literal, so retuning the
+# band cannot silently turn a behaviour test into a failing magic number. What
+# is being asserted is "hedge back to the target", which is the actual rule.
+_over = config.HEDGE_TRIGGER_DELTA + 1000
+_back = _over - config.HEDGE_TARGET_DELTA
+
+h = vol_engine.hedge_suggestion(_over)
 check('past the trigger suggests a SELL', h['action'] == 'SELL')
-check('sells back to the target buffer', h['quantity'] == 4000)
+check('sells back to the target buffer', h['quantity'] == _back,
+      f'got {h["quantity"]}, expected {_back}')
 check('not yet over the limit', not h['over_limit'])
 
-h = vol_engine.hedge_suggestion(-6000)
+h = vol_engine.hedge_suggestion(-_over)
 check('negative delta suggests a BUY', h['action'] == 'BUY')
-check('symmetric size', h['quantity'] == 4000)
+check('symmetric size', h['quantity'] == _back,
+      f'got {h["quantity"]}, expected {_back}')
 
 h = vol_engine.hedge_suggestion(9000)
 check('over the limit is flagged', h['over_limit'] and h['urgent'])
