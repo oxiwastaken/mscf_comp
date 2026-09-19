@@ -270,8 +270,17 @@ def run(dry_run=False, allow_dirty=False):
                     'log': f'auto_{tag}.log',
                 }
                 append_result(row)
+                # Name the two costs separately and never print one number for
+                # both. "friction" here is commission plus crossed spread; the
+                # CRO's fine is a different thing with a different cause, and
+                # reading one as the other points the work at the wrong
+                # problem - which it did, on 18 Sep, at $50,247 against a real
+                # fine of $3,308.
+                fine = sum(rate for _delta, rate
+                           in penalty_from_log.scan(log_path))
                 log(f'heat {heat_number} finished: NLV ${nlv:,.0f}  '
-                    f'friction ${stats["friction"]:,}  '
+                    f'fees+spread ${stats["friction"]:,}  '
+                    f'fine ${fine:,.0f}  '
                     f'contracts {stats["contracts"]:,}')
 
                 # Fresh processes for the next heat - a carried-over gap EMA,
