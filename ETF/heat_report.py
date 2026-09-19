@@ -31,12 +31,17 @@ TARGET = 40000.0
 HEAT_TICKS = 300
 MIN_TICKS = 60
 
-# Chronological, so the table reads as the project's actual trajectory.
-ORDER = ["ritc_x1", "ritc_x2", "ritc_x2_adaptive", "netbar_fxhedge",
-         "v5_depthunwind", "v6_depthgate", "v7_edgecal", "v8_capacity",
-         "v9_slipgated", "v10_revert", "v11_hedgesafe", "v12_passiveunwind",
-         "v13_prehedge", "v14_holdout", "v15_exitbasis", "v16_trackersync",
-         "v17_holdtick"]
+# Version order is DERIVED from the logs, not hardcoded. A hardcoded list goes
+# stale the moment someone ships a version and forgets to add it here, and the
+# failure is silent - the row just drops into "unlisted". That is exactly what
+# happened to v21 through v26.
+def version_order(heats):
+    """Versions in the order they first appear in the logs."""
+    seen = []
+    for h in heats:
+        if h["version"] not in seen:
+            seen.append(h["version"])
+    return seen
 
 
 def load():
@@ -102,7 +107,7 @@ def main():
     print(f"{'version':<19}{'FULL heats':>22}{'per-tick (all heats)':>30}")
     print(f"{'':<19}{'n':>4}{'mean':>10}{'win':>8}"
           f"{'n':>5}{'ticks':>8}{'P&L/tick':>11}{'-> /heat':>12}{'vs target':>11}")
-    for v in ORDER:
+    for v in version_order(heats):
         hs = by.get(v)
         if not hs:
             continue
@@ -116,10 +121,6 @@ def main():
                 else f"{'-':>4}{'-':>10}{'-':>8}")
         print(f"{v:<19}{fcol}{len(hs):>5}{ticks:>8,}{per_tick:>11,.1f}"
               f"{scaled:>12,.0f}{scaled / TARGET:>10.0%}")
-
-    unlisted = [v for v in by if v not in ORDER]
-    for v in unlisted:
-        print(f"  (unlisted version in logs: {v}, {len(by[v])} heats)")
 
     # The headline: what has actually run, most recent generation first.
     print()
@@ -144,7 +145,7 @@ def main():
     print()
     print(f"{'version':<19}{'heats':>7}{'tenders seen':>14}{'accepted':>10}"
           f"{'capture':>9}{'passive share':>15}")
-    for v in ORDER:
+    for v in version_order(heats):
         hs = by.get(v)
         if not hs:
             continue

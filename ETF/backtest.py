@@ -182,11 +182,15 @@ def build():
     return heats, reasons
 
 
-ORDER = ["(pre-versioning)", "ritc_x1", "ritc_x2", "ritc_x2_adaptive",
-         "netbar_fxhedge", "v5_depthunwind", "v6_depthgate", "v7_edgecal",
-         "v8_capacity", "v9_slipgated", "v10_revert", "v11_hedgesafe",
-         "v12_passiveunwind", "v13_prehedge", "v14_holdout", "v15_exitbasis",
-         "v16_trackersync", "v17_holdtick"]
+def version_order(rows):
+    """Versions in the order they first appear in the logs. Derived, never
+    hardcoded - a hardcoded list drops newly shipped versions silently, which
+    is how v21 through v26 went missing from this table."""
+    seen = []
+    for r in rows:
+        if r["version"] not in seen:
+            seen.append(r["version"])
+    return seen
 
 
 def main():
@@ -216,7 +220,7 @@ def main():
     print(f"{'version':<19}{'heats':>6}{'ticks':>7}{'P&L/tick':>10}"
           f"{'/heat':>10}{'tender gate':>13}{'meas':>7}{'realised':>10}{'leak':>9}"
           f"{'arb':>8}{'missed':>10}")
-    for v in ORDER:
+    for v in version_order(rows):
         hs = by.get(v)
         if not hs:
             continue
@@ -248,7 +252,7 @@ def main():
               f"{statistics.mean([h['missed_edge'] for h in full]):,.0f} USD/heat")
 
     print("\nwhy positive-edge tenders were refused (USD, scaled per heat):")
-    for v in ORDER:
+    for v in version_order(rows):
         if v not in reasons:
             continue
         n = sum(h["ticks"] for h in by[v]) / HEAT_TICKS
