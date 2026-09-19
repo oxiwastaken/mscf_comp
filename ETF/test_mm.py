@@ -74,6 +74,9 @@ def book(bid, ask):
 
 
 SNAP = {"usd_bid": 1.02, "usd_ask": 1.02}
+# These tests cover the market-making logic itself, which stays in the code
+# while production has it switched off (v26) - so switch it on here.
+B.MM_ENABLED = True
 ex = Exchange()
 for name in ("place_lmt", "place_mkt", "open_orders", "get_order", "cancel_orders"):
     setattr(B, name, getattr(ex, name))
