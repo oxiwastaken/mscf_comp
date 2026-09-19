@@ -1,0 +1,15 @@
+run_id,ts,risk_model,risk_model_desc,arb_threshold_cad,order_qty,max_long_net,max_short_net,max_gross,loop_sleep
+20260918-135914,2026-09-18T13:59:14.309,ritc_x2,"net=B+B+2R, gross=|B|+|B|+2|R|",0.07,5000,25000,-25000,250000,0.5
+20260918-141147,2026-09-18T14:11:47.506,ritc_x2,"net=B+B+2R, gross=|B|+|B|+2|R|",0.07,5000,25000,-25000,250000,0.5
+20260918-142032,2026-09-18T14:20:32.025,ritc_x2_adaptive,net=B+B+2R; per-direction threshold recalibrated each heat,0.07,5000,25000,-25000,250000,0.5
+20260918-185747,2026-09-18T18:57:47.424,netbar_fxhedge,bar fitted on net outcome + residual USD flattened each cycle,0.07,5000,25000,-25000,250000,0.5
+20260918-185839,2026-09-18T18:58:39.208,netbar_fxhedge,bar fitted on net outcome + residual USD flattened each cycle,0.07,5000,25000,-25000,250000,0.5
+20260918-191139,2026-09-18T19:11:39.446,netbar_fxhedge,bar fitted on net outcome + residual USD flattened each cycle,0.07,5000,25000,-25000,250000,0.5
+20260918-191320,2026-09-18T19:13:20.526,netbar_fxhedge,bar fitted on net outcome + residual USD flattened each cycle,0.07,5000,25000,-25000,250000,0.5
+20260918-191430,2026-09-18T19:14:30.801,netbar_fxhedge,bar fitted on net outcome + residual USD flattened each cycle,0.07,5000,25000,-25000,250000,0.5
+20260918-191958,2026-09-18T19:19:58.731,netbar_fxhedge,bar fitted on net outcome + residual USD flattened each cycle,0.07,5000,25000,-25000,250000,0.5
+20260918-211608,2026-09-18T21:16:08.790,netbar_fxhedge,bar fitted on net outcome + residual USD flattened each cycle,0.07,5000,25000,-25000,250000,0.5
+20260918-213352,2026-09-18T21:33:52.063,v5_depthunwind,v4 + depth-sized unwind with fill logging,0.07,5000,25000,-25000,250000,0.5
+20260918-213909,2026-09-18T21:39:09.657,v6_depthgate,"v5 + tender edge priced at chunk VWAP, not top-of-book",0.07,5000,25000,-25000,250000,0.5
+20260918-214346,2026-09-18T21:43:46.275,v7_edgecal,"v6 + tender bar recalibrated for honest pricing, float-safe",0.07,5000,25000,-25000,250000,0.5
+20260918-220310,2026-09-18T22:03:10.365,v7_edgecal,"v6 + tender bar recalibrated for honest pricing, float-safe",0.07,5000,25000,-25000,250000,0.5

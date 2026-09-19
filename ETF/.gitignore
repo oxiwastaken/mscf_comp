@@ -1,0 +1,15 @@
+# Local credentials - never commit these
+.env
+
+# Virtualenv
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
+
+# Runtime console capture (the CSVs in logs/ are the real record)
+logs/bot.stdout.log

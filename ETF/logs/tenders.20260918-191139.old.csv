@@ -1,0 +1,1 @@
+run_id,risk_model,heat,tick,ts,tender_id,ticker,action,quantity,price,is_fixed_bid,expires,mkt_bid,mkt_ask,usd_bid,usd_ask,accepted,accept_ok
