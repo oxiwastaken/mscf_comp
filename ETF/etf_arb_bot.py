@@ -53,7 +53,11 @@ for _stream in (sys.stdout, sys.stderr):
 # CONNECTION
 # ============================================================================
 
-API_ENDPOINT = "http://flserver.rotman.utoronto.ca:16635/v1"
+# Competition, 19 Sep: the DMA REST API moved to 16655. Read off the RIT
+# client's own API settings screen (DMA REST API -> Base URL); 16635 was the
+# practice endpoint and refuses connections now. Override with RIT_DMA_URL.
+API_ENDPOINT = os.environ.get(
+    "RIT_DMA_URL", "http://flserver.rotman.utoronto.ca:16655") + "/v1"
 
 def _load_dotenv(path=".env"):
     """Read KEY=VALUE lines from a gitignored .env into the environment.
