@@ -905,6 +905,23 @@ check('with the share book full it stands down to the plain straddle',
       == {'RTM50C': 500, 'RTM50P': 500},
       f'got {structure.desired_book(expiring_chain, 50.0, 500, underlying=config.LIMIT_RTM_GROSS)}')
 
+# The structure comes off before the straddle does. Near expiry its vega is
+# nearly gone while its share of the gamma is not, and the live tape shows what
+# that costs: ticks 243-256 of the 21:49 heat, spot pinned on the K52 strike,
+# delta reversing every tick from -23,734 to +19,290 while the hedge chased it.
+t = make_trader()
+check('the structure runs while there is still vega to buy',
+      t.wing_allowance(100, 300) == structure.WING_CONTRACTS,
+      f'got {t.wing_allowance(100, 300)}')
+check('and comes off before the pin',
+      t.wing_allowance(int(300 * autotrader.STRUCTURE_OFF_AFTER), 300) == 0,
+      f'got {t.wing_allowance(240, 300)}')
+check('it comes off BEFORE the straddle stands down, not with it',
+      autotrader.STRUCTURE_OFF_AFTER < autotrader.NO_NEW_AFTER,
+      f'{autotrader.STRUCTURE_OFF_AFTER} vs {autotrader.NO_NEW_AFTER}')
+check('a zero-length case does not divide by it',
+      t.wing_allowance(0, 0) == structure.WING_CONTRACTS)
+
 # THE LIVE-SAFETY PROPERTY. Both limits are enforced on submission, so every
 # intermediate state has to be legal too - not just the destination. Flipping
 # from a long structure to a short one is the hard case: sell the at-the-money

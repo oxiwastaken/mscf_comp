@@ -1,0 +1,12 @@
+
+  163 recordings, policy ratchet+news
+
+  config                                mean     vs ref      t   penalty       worst   live-adj
+  shipped (structure to the end) $   134,679         +0    0.0 $  14,517 $   -40,716         +0
+  structure off at 0.72          $   134,977       +298    0.3 $  11,872 $   -48,562       +248
+  structure off at 0.76          $   132,609     -2,071   -3.3 $  12,801 $   -68,363     -1,725
+  structure off at 0.80          $   135,831     +1,152    3.9 $  13,329 $   -43,943       +960
+  structure off at 0.84          $   135,603       +923    3.7 $  13,735 $   -43,805       +770
+  structure off at 0.88          $   135,290       +611    3.7 $  14,148 $   -39,945       +509
+  structure off at 0.90          $   134,679         +0    0.0 $  14,517 $   -40,716         +0
+

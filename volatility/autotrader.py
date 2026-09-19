@@ -86,6 +86,32 @@ EXIT_VOL_EDGE = 0.003
 # Stop opening new positions in the last fraction of the case: near expiry ATM
 # delta flips between +/-1 on tiny moves and hedging it becomes ruinous.
 NO_NEW_AFTER = 0.90
+# Fraction of the heat after which the gross-capacity structure comes off,
+# leaving the plain straddle to run to the stand-down above.
+#
+# This is about PIN RISK, and the live tape shows it plainly. Heat 21:49,
+# ticks 243-256: spot oscillating on the K52 strike with a short 875/875
+# straddle twelve ticks from stand-down.
+#
+#     tick 244  delta -17,382  BUY  15,382
+#     tick 247  delta +19,290  SELL 17,290
+#     tick 248  delta -23,734  BUY  21,734   bought at 52.43
+#     tick 249  delta +14,106  SELL 12,106   sold at 52.12
+#
+# Short gamma at the strike at expiry: delta reverses every tick, the hedge
+# chases it, and the book buys high and sells low the whole way. That one
+# episode cost $6,066 in fines and the whipsaw on top is a straight P&L loss.
+#
+# The fix is NOT to stand the whole book down sooner - the late window pays
+# despite the pin, and bringing NO_NEW_AFTER to 0.70 costs $16,258 a heat. It
+# is to drop the OPTIONAL part. The structure is 750 contracts carrying no view
+# of its own; it exists to buy vega, and vega is nearly gone by then while its
+# share of the gamma is not.
+#
+# Swept over 163 recordings, paired: 0.80 is +$1,152 (t 3.9), 0.84 +$923,
+# 0.88 +$611, and 0.90 is exactly zero - which is the sanity check, since the
+# whole book already stands down there. Penalty falls monotonically with it.
+STRUCTURE_OFF_AFTER = 0.80
 # Deadband on rebalancing, in contracts per leg.
 #
 # The target size moves with the vol gap, and the gap jitters tick to tick as
@@ -408,7 +434,8 @@ class AutoTrader:
             chain, strike, target,
             held={row['ticker']: row['position'] for row in chain['rows']},
             net_limit=net_limit, gross_limit=_gross_limit,
-            underlying=float(chain['underlying_position']))
+            underlying=float(chain['underlying_position']),
+            wing_contracts=self.wing_allowance(tick, total))
 
         if self.verbose or target != round(held):
             wings = int(sum(abs(q) for t, q in desired.items()
@@ -468,6 +495,21 @@ class AutoTrader:
         # penalty accrues every second whatever else happens.
         self.hedge_running(delta, underlying)
         return True
+
+    @staticmethod
+    def wing_allowance(tick, total):
+        """
+        Contracts the structure may use at this point in the heat.
+
+        The structure comes off before the straddle does. It is the optional
+        part of the book - 750 contracts bought purely for vega, carrying no
+        view - and near expiry that vega is nearly gone while its share of the
+        gamma is not. See STRUCTURE_OFF_AFTER for the tape that shows what
+        holding it into the pin costs.
+        """
+        if not total or tick < total * STRUCTURE_OFF_AFTER:
+            return structure.WING_CONTRACTS
+        return 0
 
     def net_contracts(self, chain):
         """Signed sum of every option position - what the net limit counts."""
