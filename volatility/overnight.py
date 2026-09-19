@@ -33,6 +33,7 @@ import sys
 import time
 from datetime import datetime
 
+import penalty_from_log
 from rit_api import ApiException, RitClient
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -255,7 +256,8 @@ def run(dry_run=False, allow_dirty=False):
                 except ApiException:
                     nlv = 0.0
 
-                stats = parse_log(os.path.join(LOGS, f'auto_{tag}.log'))
+                log_path = os.path.join(LOGS, f'auto_{tag}.log')
+                stats = parse_log(log_path)
                 row = {
                     'finished': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     'tag': tag,
