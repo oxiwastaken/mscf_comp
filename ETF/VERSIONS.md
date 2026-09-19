@@ -252,6 +252,95 @@ aggregate it could not attribute. There, per-chunk slippage could not see cost
 accruing across cycles; here, raw RITC position could not see which strategy
 owned the inventory.
 
+## `v12_passiveunwind` — the unwind rests before it crosses
+
+Every order this bot had ever sent was a MARKET order. The case pays a
+**0.01/share rebate on passive limit fills** against the 0.02/share market fee,
+and the unwind moves ~490,000 shares a heat, so the fee line alone was worth
+looking at.
+
+Built on top of v11, which had just established *what* the unwind should
+target. This changes *how* it gets there.
+
+**What it does.** Two layers. The passive layer keeps one 10,000-unit limit
+order resting at the touch — `bid + 0.01` when selling, which is inside the
+0.08 median RITC spread and therefore becomes the best offer rather than
+joining a queue. The aggressive layer is v11's market chunker, unchanged, but
+it only fires when the position is behind a linear glide path to flat. Any unit
+the passive layer clears is a unit the aggressive layer no longer has to take.
+
+If nothing ever fills passively, every unit goes through the aggressive layer
+and behaviour degrades exactly to v11. That property is what makes this safe to
+ship in a way v8/v9 were not.
+
+**What it is worth — and what it is not.** The first estimate was 14,700
+CAD/heat, from 490,000 shares × 0.03. That was wrong: it assumed every share
+fills passively. Measured passive share is 12–15% at the shipped setting, so
+the real figure is **~315 CAD per unwind, ~1,300 CAD/heat** at four tenders.
+Small, certain, and free — but not a fix for the 40,000/heat target.
+
+**The deadline is the whole design.** `sweep_deadline.py` over 463 windows of
+the logged RITC tape, per ~90,000 unit unwind:
+
+| deadline | passive | flat@ | fee saved | price sd | worst window |
+|----------|---------|-------|-----------|----------|--------------|
+| 8        | 15%     | 8.7   | +405      | 0.0248   | −36,000      |
+| 12       | 23%     | 12.0  | +608      | 0.0750   | −89,000      |
+| 25       | 47%     | 24.9  | +1,280    | 0.1847   | −175,000     |
+
+Resting longer earns more rebate and costs far more variance. The price term
+has a mean near zero at every setting (−0.005/unit) — drift is a martingale,
+so extra cycles add spread, not expected cost — but the spread grows 7x from 8
+to 25 cycles, on a heat P&L that already ranges −16,522 to +74,664. Paying ~875
+of certain fee saving for a 0.16/unit wider distribution on 90,000 units is a
+bad trade.
+
+`UNWIND_DEADLINE_CYCLES = 8` is the pace v11's chunker already achieves, so the
+passive layer **displaces** aggressive fills rather than **delaying** them. At 8
+the price sd (0.0248) matches the market-only baseline (0.0254) and the position
+clears in 8.7 cycles against 8.0. Below 8 the setting stops binding — the
+depth-limited chunker cannot go faster — so 3 and 5 give identical results.
+
+**Bug found and fixed while testing.** `UnwindState.behind()` computed
+`self.opened or cycle`, which reads a legitimate cycle 0 as unset and pins
+`elapsed` at 0 forever. The deadline silently never engaged and the position
+never cleared. Caught only because `sim_unwind.py` asserts that the position
+reaches flat; nothing in a live heat would have reported it as anything other
+than a slow unwind.
+
+**Interaction with v11.** A passive fill changes the position between cycles,
+without passing through `unwind_ritc` the way a market order does. It is the
+only inventory change the unwind does not make itself, so `tender_position` is
+decremented in the reconcile loop before anything is decided - otherwise the
+tracker would keep pointing at inventory that has already gone.
+
+**Also here.** `authorization()` resolves credentials at connect time instead of
+at import, so the module can be imported without a `.env` — without that the
+simulator cannot drive the real trading functions. `analyze_tenders.py` now
+reads `trades*.csv` and `tenders*.csv` across generations rather than only the
+current file, and scores on `quantity_filled` rather than order size, because a
+resting order fills in pieces.
+
+Re-running it across the recovered history says something the single-file view
+hid: v10 has now taken five tenders at a gate edge of +0.1035 and realised
++0.0485, giving back +0.0550/unit. **v7's +0.2354 does not look like a property
+of one-chunk unwinding** — on six tenders it looks like a small sample.
+
+### Tooling
+
+- `sim_unwind.py` — fake exchange implementing the endpoints the bot calls,
+  driving the real `unwind_ritc` over the logged RITC tape. Asserts: the
+  position reaches flat, inside the deadline, never flips through zero, leaves
+  no resting orders, and does not clear later than the market-only baseline. Its *cost* numbers come
+  from a synthetic book with an invented impact coefficient and are labelled
+  INDICATIVE — they are not evidence.
+- `sweep_deadline.py` — picks `UNWIND_DEADLINE_CYCLES` by paired comparison.
+  An earlier version of it differenced each window against the *pooled* mean
+  baseline instead of the same window's baseline; since RITC ranges 22–27 across
+  these logs that reported a 0.94/unit spread which was entirely cross-window
+  price level. Same failure mode as the v8/v9 metric, caught before it decided
+  anything.
+
 ---
 
 ## Known open items

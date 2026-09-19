@@ -14,21 +14,45 @@ versus what the full unwind actually cost.
 
 import csv
 from collections import defaultdict
+from pathlib import Path
 
 UNWIND_WINDOW_TICKS = 25
 
+LOG_DIR = Path(__file__).resolve().parent / "logs"
 
-def load(path):
-    try:
-        return list(csv.DictReader(open(path, newline="")))
-    except FileNotFoundError:
-        return []
+
+def load(name):
+    """Read every generation of a log, not just the current file.
+
+    CsvLog archives the old file whenever the schema changes, so reading only
+    `trades.csv` silently drops every version that ran before the last column
+    was added - which is exactly the history a version comparison needs.
+    """
+    rows = []
+    for path in sorted(LOG_DIR.glob(f"{name}*.csv")):
+        with path.open(newline="") as fh:
+            rows.extend(csv.DictReader(fh))
+    return rows
+
+
+def filled_qty(row):
+    """Units actually traded. Market orders fill whole, so `qty` and
+    `quantity_filled` agree; a resting limit order fills in pieces and only
+    `quantity_filled` is true."""
+    for key in ("quantity_filled", "qty"):
+        try:
+            v = float(row.get(key) or 0)
+        except ValueError:
+            continue
+        if v:
+            return v
+    return 0.0
 
 
 def realised():
-    trades = [r for r in load("logs/trades.csv") if r["direction"] == "unwind"]
+    trades = [r for r in load("trades") if r["direction"] == "unwind"]
     rows = []
-    for t in load("logs/tenders.csv"):
+    for t in load("tenders"):
         if t.get("accept_ok") != "True":
             continue
         try:
@@ -41,8 +65,12 @@ def realised():
                  and r["vwap"] not in ("", "None")]
         if not fills:
             continue
-        filled = sum(float(r["qty"]) for r in fills)
-        vwap = sum(float(r["qty"]) * float(r["vwap"]) for r in fills) / filled
+        filled = sum(filled_qty(r) for r in fills)
+        if not filled:
+            continue
+        vwap = sum(filled_qty(r) * float(r["vwap"]) for r in fills) / filled
+        passive = sum(filled_qty(r) for r in fills
+                      if r.get("exec_style") == "passive")
         # Sold to them at px and bought back at vwap, or the reverse.
         per_unit = (px - vwap) if t["action"] == "SELL" else (vwap - px)
         rows.append({
@@ -50,6 +78,7 @@ def realised():
             "action": t["action"], "qty": qty, "tender_px": px,
             "gate_edge": float(t["edge_vs_mkt"] or 0), "unwind_vwap": vwap,
             "realised_per_unit": per_unit, "total_usd": per_unit * min(filled, qty),
+            "passive_share": round(passive / filled, 4),
         })
     return rows
 
@@ -65,15 +94,17 @@ def main():
         w.writeheader()
         w.writerows(rows)
 
-    print(f"{'version':<16} {'n':>3} {'gate edge':>10} {'realised':>10} {'slippage':>10} {'total USD':>11}")
+    print(f"{'version':<18} {'n':>3} {'gate edge':>10} {'realised':>10} "
+          f"{'slippage':>10} {'passive':>8} {'total USD':>11}")
     by = defaultdict(list)
     for r in rows:
         by[r["version"]].append(r)
     for v, rs in by.items():
         g = sum(x["gate_edge"] for x in rs) / len(rs)
         p = sum(x["realised_per_unit"] for x in rs) / len(rs)
-        print(f"{v:<16} {len(rs):>3} {g:>+10.4f} {p:>+10.4f} {g - p:>+10.4f} "
-              f"{sum(x['total_usd'] for x in rs):>+11,.0f}")
+        pa = sum(x["passive_share"] for x in rs) / len(rs)
+        print(f"{v:<18} {len(rs):>3} {g:>+10.4f} {p:>+10.4f} {g - p:>+10.4f} "
+              f"{pa:>7.0%} {sum(x['total_usd'] for x in rs):>+11,.0f}")
     print(f"\nwrote logs/tender_pnl.csv ({len(rows)} tenders)")
     print("gate edge minus realised = what the unwind gave back")
 

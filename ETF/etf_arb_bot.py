@@ -59,12 +59,22 @@ def _load_dotenv(path=".env"):
 _load_dotenv()
 USERNAME = os.environ.get("RIT_USER")
 PASSWORD = os.environ.get("RIT_PASS")
-if not USERNAME or not PASSWORD:
-    raise SystemExit(
-        "Missing credentials. Copy .env.example to .env and fill in "
-        "RIT_USER / RIT_PASS, or export them in your shell."
-    )
-AUTHORIZATION = {'Authorization': 'Basic ' + base64.b64encode(f"{USERNAME}:{PASSWORD}".encode()).decode()}
+
+
+def authorization():
+    """Basic-auth header, resolved at connect time rather than at import.
+
+    Checked here and not at module scope so the module stays importable without
+    credentials - `sim_unwind.py` drives the real trading functions against a
+    fake exchange, and it cannot do that if importing the bot exits the process.
+    """
+    if not USERNAME or not PASSWORD:
+        raise SystemExit(
+            "Missing credentials. Copy .env.example to .env and fill in "
+            "RIT_USER / RIT_PASS, or export them in your shell."
+        )
+    token = base64.b64encode(f"{USERNAME}:{PASSWORD}".encode()).decode()
+    return {'Authorization': 'Basic ' + token}
 
 shutdown = False
 
@@ -231,6 +241,65 @@ DEPTH_FRACTION = 0.5
 # the arb's own small positions.
 UNWIND_THRESHOLD = 2000
 
+# --- passive unwind ------------------------------------------------------
+# Every order this bot has ever sent has been a MARKET order, so the unwind has
+# been paying 0.02/share in fees and crossing a 0.08-0.10 spread on ~490,000
+# shares a heat. The case pays a 0.01/share REBATE on passive limit fills, so
+# each share unwound passively instead of aggressively is worth:
+#
+#     0.03  fee (-0.02) turned into rebate (+0.01)
+#   + 0.01  sold at bid+0.01 instead of at the bid
+#   + ~     no book-walk: a resting order does not take liquidity, so it cannot
+#           produce the self-inflicted drift that v10 measured at ~0.14/unit
+#           across a 92,000 unit market unwind
+#
+# At 490,000 shares/heat the fee term alone is ~14,700 CAD/heat.
+#
+# Fill rates, measured on the logged RITC quote series (9,312 observations): a
+# sell resting at bid+0.01 is reached by a later bid 54% of the time within 3
+# cycles, 71% within 8, 80% within 20. Median RITC spread is 0.08, so bid+0.01
+# is comfortably inside it and rests as the best offer rather than joining a
+# queue.
+PASSIVE_UNWIND = True
+# Minimum price increment. Every BULL/BEAR/RITC quote in 55,886 logged
+# observations is cent-quantised; only USD trades in finer increments.
+PRICE_TICK = 0.01
+# Cycles allowed to clear a tender position before the aggressive layer takes
+# over completely.
+#
+# Set to the pace the v10 market chunker already achieves (~8 cycles) rather
+# than to anything slower, so the passive layer DISPLACES aggressive fills
+# instead of DELAYING them. sweep_deadline.py over 463 windows of the logged
+# tape, per ~90,000 unit unwind:
+#
+#   deadline   passive   flat@   fee saved   price sd   worst window
+#          8       15%     8.7        +405     0.0248        -36,000
+#         12       23%    12.0        +608     0.0750        -89,000
+#         25       47%    24.9      +1,280     0.1847       -175,000
+#
+# The extra fee at a longer deadline is real but small; the variance it buys is
+# not. Drift over the extra cycles has a mean near zero (-0.005/unit at every
+# setting) and a spread that grows 7x from 8 to 25 cycles, on a heat P&L that
+# already ranges -16,522 to +74,664. Paying ~875 USD of certain fee saving for
+# a 0.16/unit wider distribution on 90,000 units is a bad trade.
+#
+# At 8 the price sd (0.0248) matches the market-only baseline (0.0254) and the
+# position still clears in 8.7 cycles against 8.0 - the rebate is earned for
+# free. Below 8 the setting stops binding: the depth-limited chunker cannot go
+# faster anyway, so 3 and 5 give identical results.
+UNWIND_DEADLINE_CYCLES = 8
+# Passive orders resting at once. One order at the touch is what earns the
+# rebate; stacking more of them just shows the market our full size.
+PASSIVE_MAX_LIVE = 1
+# Size of a single passive order. Larger than the market chunk because a
+# resting order does not move the price - it only fills if someone comes to it.
+PASSIVE_CHUNK = 10000
+# Re-post a resting order once the touch has moved this far from its price.
+# Below this it stays put: cancel/replace costs two requests and loses queue
+# position, and the order is still the best offer while the touch is within a
+# tick of it.
+PASSIVE_REPRICE_TICKS = 1
+
 # Retained only as the pre-calibration fallback; live bars come from
 # calibration.calibrate() and are logged per heat.
 ARB_THRESHOLD_CAD = 0.07
@@ -247,8 +316,14 @@ ARB_THRESHOLD_CAD = 0.07
 #             cycle; tender accept fixed (see VERSIONS.md).
 #   v5_depthunwind - current. Unwind chunks sized to visible book depth and
 #             every unwind fill logged, to measure what the unwind costs.
-RISK_MODEL = "v11_hedgesafe"
-RISK_MODEL_DESC = "unwind targets tender inventory only, never the arb hedge leg"
+#   v10_revert - v7 unwind rate and bar restored; per-tender realised P&L logged.
+#   v11_hedgesafe - unwind targets tender inventory only, never the arb's ETF
+#             hedge leg.
+#   v12_passiveunwind - v11 plus a passive layer: the unwind rests limit orders
+#             at the touch for the 0.01 rebate and only crosses when it is
+#             behind the glide path to flat.
+RISK_MODEL = "v12_passiveunwind"
+RISK_MODEL_DESC = "v11 hedge-safe target, unwound passive-first and crossing only when behind"
 
 LOOP_SLEEP = 0.5    # between cycles inside a heat (~8 requests per cycle)
 WAIT_POLL = 2.0     # between polls while waiting for the next heat
@@ -283,7 +358,7 @@ TICK_FIELDS = ["run_id", "risk_model", "heat", "tick", "ts"] + SNAP_FIELDS + [
 TRADE_FIELDS = [
     "run_id", "risk_model", "heat", "tick", "ts", "direction", "edge_at_decision", "leg",
     "ticker", "action", "qty", "ok", "order_id", "quantity_filled", "vwap",
-    "order_status",
+    "order_status", "exec_style", "limit_price",
 ] + SNAP_FIELDS
 
 TENDER_FIELDS = [
@@ -299,6 +374,7 @@ HEAT_FIELDS = [
     "cycles", "arbs_fired", "tenders_seen", "tenders_accepted",
     "nlv_start", "nlv_end", "heat_pnl",
     "base_basket_rich", "base_etf_rich", "margin_basket_rich", "margin_etf_rich",
+    "unwind_passive", "unwind_aggressive", "passive_share", "fee_saved",
 ]
 
 
@@ -443,6 +519,124 @@ def place_mkt(session, ticker, action, qty):
                                "quantity": int(qty), "action": action})
 
 
+def place_lmt(session, ticker, action, qty, price):
+    """Post a passive limit order. `price` is required when type is LIMIT."""
+    return api_request(session, 'POST', 'orders',
+                       params={"ticker": ticker, "type": "LIMIT",
+                               "quantity": int(qty), "action": action,
+                               "price": round(float(price), 2)})
+
+
+def open_orders(session):
+    """Currently resting orders. GET /orders defaults to status=OPEN."""
+    return api_request(session, 'GET', 'orders', params={"status": "OPEN"}) or []
+
+
+def get_order(session, order_id):
+    return api_request(session, 'GET', f"orders/{order_id}")
+
+
+def cancel_orders(session, ids):
+    """Cancel a set of orders in ONE request.
+
+    POST /commands/cancel takes a comma-separated `ids` list, so a reprice costs
+    one cancel plus one insert regardless of how many orders are being pulled.
+    """
+    if not ids:
+        return
+    api_request(session, 'POST', 'commands/cancel',
+                params={"ids": ",".join(str(i) for i in ids)})
+
+
+class Resting:
+    """Our live passive orders, and the fills they produce.
+
+    A limit order fills in pieces over several cycles, so the fill has to be
+    tracked rather than read off the POST response the way a market order's is.
+    Each cycle the open list is re-read and `quantity_filled` compared against
+    what was last seen; the difference is the new fill. An order that has left
+    the open list is resolved with a single GET so its final fill is never lost
+    - which matters because an order that transacts completely disappears in
+    exactly the same way as one that was cancelled.
+    """
+
+    def __init__(self):
+        self.orders = {}   # order_id -> {ticker, action, price, qty, filled, tick}
+
+    def add(self, resp, tick):
+        oid = resp.get("order_id")
+        if oid is None:
+            return None
+        self.orders[oid] = {
+            "order_id": oid,
+            "ticker": resp.get("ticker"), "action": resp.get("action"),
+            "price": float(resp.get("price") or 0),
+            "qty": float(resp.get("quantity") or 0),
+            "filled": float(resp.get("quantity_filled") or 0),
+            "tick": tick,
+        }
+        return oid
+
+    def ids_for(self, ticker):
+        return [oid for oid, o in self.orders.items() if o["ticker"] == ticker]
+
+    def live_qty(self, ticker, action):
+        """Unfilled size still working, so the next order is not a duplicate."""
+        return sum(max(o["qty"] - o["filled"], 0) for o in self.orders.values()
+                   if o["ticker"] == ticker and o["action"] == action)
+
+    def prices(self, ticker, action):
+        return [o["price"] for o in self.orders.values()
+                if o["ticker"] == ticker and o["action"] == action]
+
+    def reconcile(self, session):
+        """Return [(order, newly_filled, vwap)] and drop anything finished.
+
+        Called once per cycle before any new order is placed, so decisions are
+        made against the true remaining size rather than the position alone -
+        the position does not move until a resting order actually fills, and
+        re-posting against it would stack duplicate size on the book.
+        """
+        try:
+            live = {int(o["order_id"]): o for o in open_orders(session)}
+        except ApiException as e:
+            print(f"  open-order poll failed: {e}")
+            return []
+
+        events = []
+        for oid in list(self.orders):
+            tracked = self.orders[oid]
+            snapshot = live.get(oid)
+            if snapshot is None:
+                # Gone from the open list: transacted in full, or cancelled.
+                # One GET settles which, and carries the final fill and vwap.
+                try:
+                    snapshot = get_order(session, oid)
+                except ApiException as e:
+                    print(f"  order {oid} lookup failed: {e}")
+                    snapshot = None
+                done = True
+            else:
+                done = False
+            if snapshot:
+                filled = float(snapshot.get("quantity_filled") or 0)
+                new = filled - tracked["filled"]
+                if new > 0:
+                    events.append((dict(tracked), new,
+                                   snapshot.get("vwap") or tracked["price"]))
+                tracked["filled"] = filled
+            if done:
+                self.orders.pop(oid, None)
+        return events
+
+    def cancel_all(self, session, ticker=None):
+        ids = self.ids_for(ticker) if ticker else list(self.orders)
+        cancel_orders(session, ids)
+        for oid in ids:
+            self.orders.pop(oid, None)
+        return len(ids)
+
+
 def hedge_fx(session, pos):
     """Flatten leftover USD so P&L reflects the arb, not currency drift.
 
@@ -465,17 +659,102 @@ def hedge_fx(session, pos):
     return action, qty
 
 
-def unwind_ritc(session, pos, book, snap, logs, heat, tick):
-    """Work an oversized RITC position back toward flat, one chunk per cycle.
+class UnwindState:
+    """Per-heat state for the unwind: resting orders, the clock, and the tally.
+
+    The clock is what makes passive execution safe. Resting an order is free
+    only if the position still clears before the next tender arrives; past that
+    point a cheap fill is worth less than the ~26,000 USD/heat of tenders that
+    get refused on the net limit while the book is still full.
+    """
+
+    def __init__(self):
+        self.resting = Resting()
+        self.opened = None      # cycle the current position was taken on
+        self.peak = 0           # size to glide down from
+        self.passive_qty = 0.0
+        self.aggressive_qty = 0.0
+
+    def reset(self):
+        self.opened = None
+        self.peak = 0
+
+    def note_size(self, size, cycle):
+        """Restart the glide path when a new tender lands on top of the old one."""
+        if self.opened is None or size > self.peak + UNWIND_CHUNK:
+            self.opened = cycle
+            self.peak = size
+        self.peak = max(self.peak, size)
+
+    def behind(self, size, cycle):
+        """Units we are behind a linear glide from `peak` to flat.
+
+        Linear rather than front- or back-loaded: the passive layer fills at an
+        unpredictable rate, and a straight line is the schedule that asks the
+        aggressive layer for the least total liquidity while still finishing on
+        time.
+        """
+        # `is None`, not `or`: cycle 0 is a real cycle, and `self.opened or
+        # cycle` reads a legitimate 0 as unset, which pins elapsed at 0 forever
+        # and silently disables the deadline.
+        opened = self.opened if self.opened is not None else cycle
+        elapsed = max(cycle - opened, 0)
+        left = max(UNWIND_DEADLINE_CYCLES - elapsed, 0)
+        allowed = self.peak * (left / UNWIND_DEADLINE_CYCLES)
+        return size - allowed
+
+
+def passive_price(action, bid, ask):
+    """Best price that still rests rather than crossing.
+
+    A sell one tick above the bid becomes the best offer, since the median RITC
+    spread is 0.08. When the spread is a single tick that is not possible, so
+    the order joins the existing offer instead - still passive, still rebated,
+    just behind a queue.
+    """
+    if action == "SELL":
+        px = bid + PRICE_TICK
+        return round(ask if px >= ask else px, 2)
+    px = ask - PRICE_TICK
+    return round(bid if px <= bid else px, 2)
+
+
+def unwind_ritc(session, pos, book, snap, logs, heat, tick, cycle, st):
+    """Work an oversized RITC position back toward flat, passively first.
 
     A tender leaves ~91k units of ETF on the book, which is 182k of the 300k
     gross limit. Hedging it with the basket would add another 182k and breach
     that cap, and the converters that would collapse it are human-only per the
     case rules, so the position has to be sold back into the market instead.
-    Chunking at the 10k per-order maximum and spreading it over cycles is what
-    keeps the price impact of that unwind survivable.
+
+    Two layers:
+
+    PASSIVE rests one order at the touch. It earns the 0.01/share rebate
+    instead of paying the 0.02 fee, sells at bid+0.01 instead of at the bid,
+    and - the part v10 showed matters most - takes no liquidity at all, so it
+    cannot drag the quote the way 92,000 units of market orders did.
+
+    AGGRESSIVE is the v10 market chunker, unchanged, but it now only fires when
+    the position is behind the glide path. That keeps the deadline guarantee
+    that stops a slow unwind from blocking the next tender, while paying the
+    spread only on the units the passive layer could not clear in time.
+
+    Worst case - nothing ever fills passively - every unit goes through the
+    aggressive layer and the behaviour degrades exactly to v10.
     """
     global tender_position
+    # Passive fills are booked before anything is decided, so `tender_position`
+    # and the glide path both see them. A resting order fills between cycles
+    # without passing through this function, so it is the only inventory change
+    # the unwind does not make itself.
+    for order, filled, vwap in st.resting.reconcile(session):
+        st.passive_qty += filled
+        tender_position -= filled if order["action"] == "SELL" else -filled
+        _log_fill(logs, heat, tick, order["action"], filled, vwap,
+                  snap, "passive", order["price"], order.get("order_id"))
+        print(f"  PASSIVE fill {order['action']} {filled:,.0f} RITC @ {vwap} "
+              f"(rested {order['price']:.2f}, rebate +{filled * REBATE_LMT:,.0f})")
+
     # Only tender-derived inventory is unwound. Clamp to the live position so a
     # stale tracker can never drive trades in the wrong direction.
     ritc = int(pos.get(RITC, 0))
@@ -485,39 +764,110 @@ def unwind_ritc(session, pos, book, snap, logs, heat, tick):
     elif target < 0:
         target = max(target, min(ritc, 0))
     if abs(target) <= UNWIND_THRESHOLD:
+        if st.resting.orders:
+            st.resting.cancel_all(session, RITC)
+        st.reset()
         return None, 0
+
     action = "SELL" if target > 0 else "BUY"
-    avail = depth_within(book, "bid" if action == "SELL" else "ask")
+    # A resting order on the wrong side would build the position, not clear it.
+    if st.resting.live_qty(RITC, "BUY" if action == "SELL" else "SELL"):
+        st.resting.cancel_all(session, RITC)
+
+    size = abs(target) - UNWIND_THRESHOLD
+    st.note_size(size, cycle)
     ref_bid, ref_ask = top_of_book(book)
     ref = ref_bid if action == "SELL" else ref_ask
+    avail = depth_within(book, "bid" if action == "SELL" else "ask")
 
-    remaining = abs(target) - UNWIND_THRESHOLD
+    remaining = size
     sent = 0
-    for _ in range(UNWIND_CHUNKS_PER_CYCLE):
-        if remaining <= 0:
-            break
-        # Take at most half of what is visible, so the chunk scales down on a
-        # thin book. `avail` is decremented as we go: the book is only fetched
-        # once per cycle, so later chunks must not re-spend the same depth.
-        qty = int(min(remaining, UNWIND_CHUNK, MAX_SIZE_EQUITY,
-                      max(avail * DEPTH_FRACTION, 1000)))
-        if qty <= 0:
-            break
-        try:
-            resp = place_mkt(session, RITC, action, qty)
-        except ApiException as e:
-            print(f"  unwind failed: {e}")
-            break
-        slip = _log_unwind(logs, heat, tick, action, qty, resp, ref, snap, ritc, avail)
-        remaining -= qty
-        avail = max(avail - qty, 0)
-        sent += qty
-        tender_position -= qty if action == "SELL" else -qty
-        if slip is not None and slip > MAX_UNWIND_SLIP:
-            print(f"    slip {slip:+.4f} > {MAX_UNWIND_SLIP} - holding the rest for next cycle")
-            break
+    behind = st.behind(size, cycle) if PASSIVE_UNWIND else remaining
+    if behind > 0:
+        # Crossing is the decision; a resting order on the same side would
+        # double-count the size we are about to take, so pull it first.
+        st.resting.cancel_all(session, RITC)
+        for _ in range(UNWIND_CHUNKS_PER_CYCLE):
+            if remaining <= 0 or behind <= 0:
+                break
+            # Take at most half of what is visible, so the chunk scales down on a
+            # thin book. `avail` is decremented as we go: the book is only fetched
+            # once per cycle, so later chunks must not re-spend the same depth.
+            qty = int(min(remaining, behind, UNWIND_CHUNK, MAX_SIZE_EQUITY,
+                          max(avail * DEPTH_FRACTION, 1000)))
+            if qty <= 0:
+                break
+            try:
+                resp = place_mkt(session, RITC, action, qty)
+            except ApiException as e:
+                print(f"  unwind failed: {e}")
+                break
+            slip = _log_unwind(logs, heat, tick, action, qty, resp, ref, snap, ritc, avail)
+            remaining -= qty
+            behind -= qty
+            avail = max(avail - qty, 0)
+            sent += qty
+            st.aggressive_qty += qty
+            tender_position -= qty if action == "SELL" else -qty
+            if slip is not None and slip > MAX_UNWIND_SLIP:
+                print(f"    slip {slip:+.4f} > {MAX_UNWIND_SLIP} - holding the rest for next cycle")
+                break
+
+    if PASSIVE_UNWIND:
+        _rest_passive(session, logs, heat, tick, action, remaining,
+                      ref_bid, ref_ask, snap, st)
 
     return (action, sent) if sent else (None, 0)
+
+
+def _rest_passive(session, logs, heat, tick, action, remaining, bid, ask, snap, st):
+    """Keep one order resting at the touch, repricing it when the touch moves."""
+    if bid <= 0 or ask >= 1e12:
+        return
+    target = passive_price(action, bid, ask)
+
+    # Repricing costs a cancel plus an insert and gives up queue position, so it
+    # is only worth doing once the touch has actually moved away from us.
+    stale = [oid for oid, o in st.resting.orders.items()
+             if o["ticker"] == RITC
+             and abs(o["price"] - target) >= PASSIVE_REPRICE_TICKS * PRICE_TICK - 1e-9]
+    if stale:
+        cancel_orders(session, stale)
+        for oid in stale:
+            st.resting.orders.pop(oid, None)
+
+    live = st.resting.live_qty(RITC, action)
+    if len(st.resting.ids_for(RITC)) >= PASSIVE_MAX_LIVE:
+        return
+    # `remaining` already excludes what the aggressive layer just sold, and
+    # `live` excludes what is still working, so the two layers cannot between
+    # them sell more RITC than we actually hold.
+    room = int(min(remaining - live, PASSIVE_CHUNK, MAX_SIZE_EQUITY))
+    if room < 1000:
+        return
+    try:
+        resp = place_lmt(session, RITC, action, room, target)
+    except ApiException as e:
+        print(f"  passive rest failed: {e}")
+        return
+    if resp:
+        st.resting.add(resp, tick)
+        print(f"  REST {action} {room:,} RITC @ {target:.2f} "
+              f"(bid {bid:.2f} / ask {ask:.2f})")
+
+
+def _log_fill(logs, heat, tick, action, qty, vwap, snap, style, limit_px, order_id):
+    """One passive fill. Written with direction='unwind' so the realised-cost
+    analysis sees passive and aggressive fills in the same unwind VWAP."""
+    row = {
+        "run_id": RUN_ID, "risk_model": RISK_MODEL, "heat": heat, "tick": tick,
+        "ts": now_iso(), "direction": "unwind", "edge_at_decision": "",
+        "leg": 0, "ticker": RITC, "action": action, "qty": qty, "ok": True,
+        "order_id": order_id, "quantity_filled": qty, "vwap": vwap,
+        "order_status": "TRANSACTED", "exec_style": style, "limit_price": limit_px,
+    }
+    row.update(snap)
+    logs.trades.write(row)
 
 
 def _log_unwind(logs, heat, tick, action, qty, resp, ref, snap, ritc, avail):
@@ -525,7 +875,7 @@ def _log_unwind(logs, heat, tick, action, qty, resp, ref, snap, ritc, avail):
         "run_id": RUN_ID, "risk_model": RISK_MODEL, "heat": heat, "tick": tick,
         "ts": now_iso(), "direction": "unwind", "edge_at_decision": "",
         "leg": 0, "ticker": RITC, "action": action, "qty": qty,
-        "ok": resp is not None,
+        "ok": resp is not None, "exec_style": "aggressive", "limit_price": "",
     }
     slip = None
     if resp:
@@ -738,7 +1088,7 @@ def execute_arb(session, logs, heat, tick, direction, edge, legs, snap):
 # CORE LOGIC
 # ============================================================================
 
-def step_once(session, logs, heat, tick, bases):
+def step_once(session, logs, heat, tick, bases, cycle, st):
     books = {t: fetch_book(session, t) for t in (BULL, BEAR, RITC, USD)}
     bull_bid, bull_ask = top_of_book(books[BULL])
     bear_bid, bear_ask = top_of_book(books[BEAR])
@@ -776,7 +1126,7 @@ def step_once(session, logs, heat, tick, bases):
     req2 = calibration.required_edge(bases["etf_rich"], usd_bid)
 
     unwind_action, unwind_qty = unwind_ritc(
-        session, pos, books[RITC], snap, logs, heat, tick)
+        session, pos, books[RITC], snap, logs, heat, tick, cycle, st)
     fx_action, fx_qty = hedge_fx(session, pos)
 
     traded = False
@@ -886,6 +1236,7 @@ def run_heat(session, logs, heat, margins, prev_bases):
     last_tick = None
     cycles = arbs = tenders_seen = tenders_accepted = 0
     nlv_end = nlv_start
+    st = UnwindState()
 
     global tender_position
     tender_position = 0   # positions are closed out at heat end
@@ -914,7 +1265,7 @@ def run_heat(session, logs, heat, margins, prev_bases):
 
         try:
             (traded, e1, e2, nlv, t_seen, t_acc,
-             req1, req2) = step_once(session, logs, heat, tick, bases)
+             req1, req2) = step_once(session, logs, heat, tick, bases, cycles, st)
         except ApiException as e:
             print(f"API error: {e}")
             sleep(1)
@@ -934,9 +1285,22 @@ def run_heat(session, logs, heat, margins, prev_bases):
 
         sleep(LOOP_SLEEP)
 
+    # The case wipes open orders on reset, but leaving one resting across the
+    # gap would have it fill into the next heat's book at this heat's price.
+    if st.resting.orders:
+        try:
+            print(f"  cancelled {st.resting.cancel_all(session)} resting order(s)")
+        except ApiException as e:
+            print(f"  cancel-all failed: {e}")
+
     pnl = None
     if nlv_start is not None and nlv_end is not None:
         pnl = round(nlv_end - nlv_start, 4)
+
+    unwound = st.passive_qty + st.aggressive_qty
+    share = st.passive_qty / unwound if unwound else 0.0
+    # Rebate earned plus fee avoided: 0.03/share against having crossed.
+    saved = st.passive_qty * (FEE_MKT + REBATE_LMT)
 
     logs.heats.write({
         "run_id": RUN_ID, "risk_model": RISK_MODEL, "heat": heat, "start_ts": start_ts, "end_ts": now_iso(),
@@ -947,9 +1311,15 @@ def run_heat(session, logs, heat, margins, prev_bases):
         "base_basket_rich": bases["basket_rich"], "base_etf_rich": bases["etf_rich"],
         "margin_basket_rich": margins["basket_rich"],
         "margin_etf_rich": margins["etf_rich"],
+        "unwind_passive": round(st.passive_qty),
+        "unwind_aggressive": round(st.aggressive_qty),
+        "passive_share": round(share, 4),
+        "fee_saved": round(saved, 2),
     })
     print(f"=== heat {heat} done: ticks {first_tick}-{last_tick}, {cycles} cycles, "
           f"{arbs} arbs, {tenders_seen} tenders, P&L {pnl} ===")
+    print(f"    unwind {unwound:,.0f} units: {share:.0%} passive, "
+          f"{saved:,.0f} CAD of fees saved vs crossing everything")
     return margins, bases
 
 
@@ -961,6 +1331,11 @@ def main():
     print(f"   gross = |BULL|+|BEAR|+2*|RITC|      cap {MAX_GROSS}")
     print(f"   threshold: adaptive per direction (fees + slippage + margin)")
     print(f"   order qty {ORDER_QTY}")
+    if PASSIVE_UNWIND:
+        print(f"   unwind: rest {PASSIVE_CHUNK:,} at the touch (+{REBATE_LMT}/sh rebate), "
+              f"cross only when behind a {UNWIND_DEADLINE_CYCLES}-cycle glide")
+    else:
+        print(f"   unwind: market orders only ({FEE_MKT}/sh fee)")
     print(f" Thresholds recalibrated per heat; every row tagged risk_model={RISK_MODEL}")
     print("=" * 68)
     print(f"run_id={RUN_ID}  logging to {LOG_DIR}")
@@ -970,7 +1345,7 @@ def main():
         print(f"seeded bars from previous run: {bases}")
     try:
         with requests.Session() as s:
-            s.headers.update(AUTHORIZATION)
+            s.headers.update(authorization())
             while not shutdown:
                 if wait_for_active(s) is None:
                     break
