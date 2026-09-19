@@ -24,6 +24,7 @@ from concurrent.futures import ProcessPoolExecutor
 import autotrader as at
 import backtest
 import config
+import structure
 from replay import load
 
 # One-at-a-time sweeps. Each entry is a parameter and the values to try; the
@@ -74,20 +75,35 @@ def usable_heats(min_ticks=250):
     return paths
 
 
+MODULES = {'config': config, 'backtest': backtest, 'structure': structure,
+           'autotrader': at, '': at}
+
+
 def apply(settings):
     """
     Push a settings dict onto the live modules.
 
-    Keys are attribute names on `autotrader`, or `config.NAME` for the few
-    tunables that live in `config` (the hedge band, the option limits).
+    Keys are attribute names on `autotrader`, or `module.NAME` for the tunables
+    that live elsewhere - `config` (the hedge band, the limits) and `structure`
+    (everything about the wings).
+
+    An unknown prefix RAISES. It used to fall back to `autotrader`, which meant
+    every `structure.WING_*` sweep silently set an attribute nothing reads and
+    reported the reference config's score as the candidate's - a whole family of
+    parameters that looked measured and flat when it had never been varied at
+    all. A sweep that cannot reach a parameter must say so, not return zero.
     """
     for key, value in settings.items():
         module, _, name = key.rpartition('.')
+        if module not in MODULES:
+            raise KeyError(f'{key}: no module named {module!r} to sweep')
         # Worker processes are spawned fresh and re-import everything, so a
         # module global set in the parent does NOT reach them. Anything a sweep
         # needs to vary has to travel in the settings dict.
-        setattr({'config': config, 'backtest': backtest}.get(module, at),
-                name, value)
+        target = MODULES[module]
+        if not hasattr(target, name):
+            raise AttributeError(f'{key}: {module or "autotrader"} has no {name}')
+        setattr(target, name, value)
 
 
 def score_one(args):

@@ -209,6 +209,29 @@ def run(snapshots, policy, verbose=False):
         if not chain['live'] or not chain['forecast'] or not chain['market_avg_iv']:
             continue
 
+        # ---------------------------------------------------- THE FINE
+        # Charge it here, at the TOP of the tick, on the book carried in from
+        # the last one, priced at this tick's spot and greeks. That is exactly
+        # what the server samples: the delta the book is standing at when the
+        # second is evaluated, before anything this tick can react to it.
+        #
+        # It used to be charged at the BOTTOM, after hedging, on the delta the
+        # hedge had just flattened - so the backtest modelled a fine of $834 a
+        # heat while the server was charging $14,080 on the same heats, a
+        # factor of 17. Measured against the recordings' own `total_fines`, the
+        # charge lines up with the pre-hedge delta almost exactly (implied
+        # 30,880 against a recorded 30,931; 32,820 against 32,640).
+        #
+        # This matters beyond the number. Every conclusion of the form "cutting
+        # the fine costs more than it saves" was drawn from the old column, and
+        # a model that prices a $14,000 cost at $834 cannot rank changes that
+        # trade against it - it will reject all of them.
+        breach = max(abs(float(chain['portfolio_delta'])) - config.DELTA_LIMIT, 0.0)
+        if breach:
+            charge = breach * config.DELTA_PENALTY_RATE
+            book.cash -= charge
+            book.penalty += charge
+
         raw_gap = chain['forecast'] - chain['market_avg_iv']
         gap_ema = raw_gap if gap_ema is None else (
             at.GAP_SMOOTHING * raw_gap + (1 - at.GAP_SMOOTHING) * gap_ema)
@@ -268,9 +291,16 @@ def run(snapshots, policy, verbose=False):
         # ------------------------------------------------- rebalance policy
         may_trade = (not news_gated) or pending_resize or target == 0
         if target is not None and may_trade:
+            # `wing_allowance` is what takes the structure off before the pin.
+            # It was missing here, so STRUCTURE_OFF_AFTER scored IDENTICALLY at
+            # every value - 0.70, 0.80 and 0.90 all returned the reference mean
+            # to the dollar - and the backtest carried 750 contracts of wing
+            # into the last ticks of every heat, which is exactly the short
+            # gamma at the strike the setting exists to avoid.
             desired = structure.desired_book(
                 chain, target_strike, target, held=book.positions,
-                underlying=book.positions.get(config.UNDERLYING, 0))
+                underlying=book.positions.get(config.UNDERLYING, 0),
+                wing_contracts=at.AutoTrader.wing_allowance(tick, ticks_total))
             for row, change in order_changes(chain, desired, book.positions,
                                              rebalance_fraction):
                 book.trade_option(row, change)
@@ -324,15 +354,10 @@ def run(snapshots, policy, verbose=False):
                     <= config.LIMIT_RTM_GROSS:
                 book.trade_shares(spot, signed)
 
-        rows = [dict(r, position=book.positions.get(r['ticker'], 0))
-                for r in chain['rows']]
-        delta = vol_engine.portfolio_delta(
-            rows, book.positions.get(config.UNDERLYING, 0))
-        breach = max(abs(delta) - config.DELTA_LIMIT, 0.0)
-        if breach:
-            charge = breach * config.DELTA_PENALTY_RATE
-            book.cash -= charge
-            book.penalty += charge
+        # No second charge here. The post-hedge delta is not a thing the server
+        # ever sees a fine on - by then the hedge has flattened it. What it does
+        # see is this book at the NEXT tick's spot, and that is charged at the
+        # top of the next iteration.
 
     book.settle(last_spot or 0)
     return book, news_pnl_marks
