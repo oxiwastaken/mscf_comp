@@ -1055,6 +1055,50 @@ itself again on its own and cannot.
 `[82000, 77000, 77000, 77000]`. v22's own regression cases were all flickers
 from an exactly-reconciled tracker, which is why they passed.
 
+## Replay harness - comparing policies on the same heats
+
+`replay_tenders.py` replays every logged full heat's tender stream through a
+parameterised policy, so two policies are compared on identical markets. Live
+A/B cannot do this cheaply: heat P&L has an sd of ~53,000, so resolving a 10,000
+difference needs ~450 full heats per version. Paired replay removes the market
+from the comparison.
+
+The tender stream and prices are exact; held tenders are exact (close-out is
+proven). Unwind execution is modelled at a measured cost, so the harness
+**cannot evaluate changes to how we unwind** - only which tenders to take and
+whether to hold them.
+
+**Validation, before any experiment:**
+
+| check | result |
+|---|---|
+| exit model, live accepts replayed (19 heats) | correlation 0.86 with live P&L, error sd 26,313 against heat sd 51,509, bias -13,533 |
+| gate, v21 parameters on v21 heats | 42 of 45 live accepts reproduced (93%) |
+
+The first version scored 0.42. The missing piece was **FX**: the live bot
+converts every USD flow to CAD as it happens (`hedge_fx` flattens USD cash each
+cycle), and USD/CAD moves with an sd of ~0.04 inside a heat on a ~2.25M USD
+tender notional. Converting at the close instead is what a USD-only analysis
+implicitly assumes - which also means the earlier chat-only estimate that held
+tenders realised +0.338/unit, measured in USD, should not be relied on.
+
+**Findings, 39 heats, 309 tenders:**
+
+- **v21 vs v23 is a wash in expectation.** At the measured flicker rate (4.2% of
+  pre-hold accepts, 300 paired draws) v23 is +413/heat, t +0.19. The fix is a
+  correctness and tail-risk fix, not a mean improvement; the gap between their
+  live means is noise.
+- **Current settings are at or near the best tested.** No setting beat
+  `min_edge 0.04 / hold 200` at |t| >= 2. Raising the bar costs money: 0.08 is
+  -6,511/heat (t -2.25), 0.12 is -12,064 (t -2.49).
+- **Holding is valuable.** Never holding costs ~9,000/heat at the live bar, and
+  up to -30,107 (t -4.59) at a 0.12 bar.
+- **Holding from tick 150 looked +7,609/heat (t +1.66) but does not
+  replicate:** +15,940 in the first half of the heats, -306 in the second. Left
+  at 200.
+- **The FX treatment is fine.** Keeping USD until close-out instead of
+  converting is +1,274/heat (t +0.22) with a higher sd; no change.
+
 ## Known open items
 
 - ~~`basket_rich` is negative (−0.0218/unit over 8 arbs)~~ — **RETRACTED.**
