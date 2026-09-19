@@ -243,3 +243,7 @@ run_id,risk_model,heat,ts,direction,n_total,slip,slip_src,margin,action,base
 20260919-024524,v26_mmoff,2,2026-09-19T02:51:30.499,etf_rich,305,0.11,"fit on 60 arbs: 36 survive, net +0.0204 | step 0.100->0.110 (want 0.120)",0.01,hold (only 1 arbs last heat),0.11
 20260919-024524,v26_mmoff,3,2026-09-19T02:57:39.566,basket_rich,195,0.3,no profitable bar in 60 arbs - at ceiling,0.01,hold (only 0 arbs last heat),0.3
 20260919-024524,v26_mmoff,3,2026-09-19T02:57:39.567,etf_rich,305,0.11,"fit on 60 arbs: 36 survive, net +0.0204",0.01,hold (only 1 arbs last heat),0.12
+20260919-024524,v26_mmoff,4,2026-09-19T03:03:47.793,basket_rich,195,0.3,no profitable bar in 60 arbs - at ceiling,0.01,hold (only 0 arbs last heat),0.3
+20260919-024524,v26_mmoff,4,2026-09-19T03:03:47.795,etf_rich,310,0.02,"fit on 60 arbs: 60 survive, net +0.0234 | step 0.120->0.110 (want 0.020)",0.0,narrow (last heat +0.0960/unit over 5),0.11
+20260919-024524,v26_mmoff,5,2026-09-19T03:09:56.124,basket_rich,195,0.3,no profitable bar in 60 arbs - at ceiling,0.01,hold (only 0 arbs last heat),0.3
+20260919-024524,v26_mmoff,5,2026-09-19T03:09:56.124,etf_rich,311,0.02,"fit on 60 arbs: 60 survive, net +0.0217 | step 0.110->0.100 (want 0.020)",0.0,hold (only 1 arbs last heat),0.1
