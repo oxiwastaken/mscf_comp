@@ -1366,6 +1366,81 @@ rather than reading production, so the mechanism stays tested while the
 competition runs with it off - the same pattern `sim_unwind.py` uses for the
 hold tick.
 
+## `v29_ratelimit` - concurrent snapshot, arb first, governed request budget
+
+Builds on the `v27_holdall` competition build. Trading maths is unchanged; what
+changed is *when* the bot acts. Numbered 29 because `v28` was already taken by
+`v28_nodoubledown`, which is off in the competition build.
+
+**Premise, unverified from the repo:** Hayden's instruction that bypassing the
+API rate limit had been made allowed. Nothing in the case PDF, `RUNBOOK.md` or
+this file mentions a ceiling, so confirm the announcement before running it.
+`REQ_PER_SEC = 8.0` + `MAX_CYCLES_PER_TICK = 1` reverts the request behaviour
+while keeping the rest. Nothing here multiplexes credentials or sessions to get
+more than one trader's budget - that is a different claim and was not built.
+
+**The premise is mostly wrong, and the data says so.** Of 41,928 logged tick
+observations, 2,118 cleared the edge bar; **1,680 of those (79.3%) were refused
+by the net/gross gate**, not missed for lack of looking. Median `|net|` when
+blocked was 36,000 against the self-imposed +/-25,000. The arb is **limit-bound,
+not observation-bound** - more cycles cannot lift it, only the net cap or the
+tender reserve can, and `TENDER_GROSS_RESERVE` is well argued as it stands.
+
+Where the cadence *does* cost money:
+
+- **Staleness.** Conditional on clearing the bar, mean surplus was
+  **+0.0775/unit when read** and **-0.0329/unit ~0.96s later**; only 42.4% still
+  cleared. The edge inverts, it does not merely fade. The arb legs used to be
+  sent at the *bottom* of the cycle, six-plus round trips after the books were
+  read. `ARB_FIRST` moves the gate to immediately after the snapshot.
+- **Tender timing.** Tenders live a median of 6 ticks and we looked at each a
+  median of 3 times (0.60 looks/tick), while the edge swings a median of ~7,100
+  CAD across a tender's life. The gate already re-scores every cycle, so more
+  looks in the same window is strictly a better draw to fire on.
+
+**Backtest** (`python bench_ratelimit.py`) drives the real `step_once` against a
+synthetic exchange at 58ms/request, against a dislocation decaying in
+wall-clock time at the rate measured from `ticks.csv`:
+
+| config | cycle | c/tick | req/s | edge at the legs |
+|---|---|---|---|---|
+| serial, 0.5s sleep, arb last | 1049ms | 1.00 | 9.0 | 0.2395 |
+| serial, 0.5s sleep, arb first | 1049ms | 1.00 | 9.0 | 0.2530 |
+| concurrent, governor, arb first | 257ms | 8.00 | 35.2 | 0.2618 |
+
+**+111 CAD per arb, of which 61% needs no extra requests.** Take the split, not
+the level: `DECAY_PER_SEC` is measured but `DISLOCATION` is chosen. The durable
+claim is that most of the win is the reordering, which is free and carries no
+rule risk - so run one heat at the old request rate first.
+
+**What the backtest cannot do.** `ticks.csv` is ~1 Hz, so sub-second decay is
+modelled as linear between the only two points that exist; for an edge being
+competed away that is probably an understatement, but that is reasoning, not
+measurement. Tender timing is **not** backtested at density - only 3 tenders
+have >=8 looks, so the ~7,100 CAD is an observed range, i.e. an upper bound on
+perfect timing, not a forecast. Part 1 runs without tenders deliberately: with
+them, no arb fired in any config, because one 90,000-unit accept puts 180,000 of
+net against a +/-25,000 cap - a faithful reproduction of the finding above, and
+exactly why the two are measured apart.
+
+All eight offline suites pass. See `HANDOFF_v29_ratelimit.md` for the live
+checklist; the row that matters is realised arb slippage, and if it does not
+narrow then `ARB_FIRST = False` reverts the thesis in one line.
+
+### Two latent bugs found on the way
+
+- **`top_of_book` returns `1e12` on an empty book.** 26 of 41,954 rows (0.062%)
+  carry `|edge| > 5`. It fails *safe* for trading - both edges go hugely
+  negative, so no false trade - but it poisons any statistic over the edge
+  series. It fooled this session's own first pass into reporting lag-1
+  autocorrelation of ~0.000, one outlier owning the whole variance; excluding
+  those rows the true figure is **0.65-0.86**. Anything in `calibration.py`
+  averaging these rows is reading the same poison. **Not fixed** - it changes
+  live behaviour and belongs to whoever owns the calibration path.
+- **`handle_rate_limit` could raise on a non-JSON 429 body.** `Retry-After`'s
+  default argument called `response.json()` eagerly. Never fired because the bot
+  never approached the limit; at 35 req/s it would. **Fixed.**
+
 ---
 
 ## Known open items

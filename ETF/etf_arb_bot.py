@@ -26,9 +26,11 @@ import csv
 import os
 import signal
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from time import sleep
+from time import monotonic, sleep
 
 import requests
 
@@ -125,9 +127,200 @@ def signal_handler(signum, frame):
     print("\nShutdown requested - finishing current cycle...")
 
 
+# ============================================================================
+# REQUEST BUDGET
+# ============================================================================
+#
+# The DMA API rate-limits per trader and answers HTTP 429 with a Retry-After.
+# Until now the bot stayed clear of it by sleeping a flat LOOP_SLEEP = 0.5s
+# between cycles; at ~8 requests a cycle that held it near 8 req/s and, as
+# measured over 41,928 logged observations, produced 1.1-1.2 cycles per tick.
+#
+# With the ceiling lifted the flat sleep is the wrong instrument: it throttles
+# whether or not we are anywhere near the limit. REQ_PER_SEC replaces it with a
+# token bucket, so the budget is one number and the cycle runs as fast as that
+# number allows.
+#
+# The governor is ADAPTIVE rather than blind. If the ceiling we were told about
+# turns out not to be the ceiling the server enforces, a 429 halves the working
+# rate immediately and it recovers over ~30s. That matters because this is
+# being shipped without a live run to test it on: the failure mode of guessing
+# too high is a slower heat, not a dead one.
+
+# Requests per second the bot may issue. None = no client-side ceiling.
+# ADAPTIVE_FLOOR is where 429 backoff is allowed to bottom out.
+#
+# Held at 40.0 deliberately. I briefly set this to None (no client-side
+# ceiling) before reading HANDOFF_v29_ratelimit.md, and reverted: the v29 work
+# measured that the arb is LIMIT-bound, not observation-bound - 79.3% of
+# opportunities that cleared the edge bar were refused by the net/gross gate,
+# not missed for want of looking. Uncapped bursting therefore buys nothing the
+# net cap will let us use, while giving up the adaptive backoff's headroom.
+# Revert to 8.0 to return request behaviour to pre-v29.
+REQ_PER_SEC = 40.0
+ADAPTIVE_FLOOR = 4.0
+# Burst allowance, in requests. One cycle's worth means a cycle never pays the
+# bucket's refill latency mid-way through its own snapshot.
+REQ_BURST = 12.0
+
+
+class RateGovernor:
+    """Token bucket over the whole process, shared by every worker thread.
+
+    `rate` is the working ceiling and moves: a 429 halves it, and it climbs
+    back toward REQ_PER_SEC while requests keep succeeding. Counters are kept
+    so a heat can report what it actually spent.
+    """
+
+    def __init__(self, rate=REQ_PER_SEC, burst=REQ_BURST):
+        self.target = rate
+        self.rate = rate
+        self.burst = burst
+        self.tokens = burst
+        self.updated = monotonic()
+        self.lock = threading.Lock()
+        self.requests = 0
+        self.throttled = 0.0     # seconds spent waiting on our own bucket
+        self.rejections = 0      # 429s seen
+        self.last_reject = None
+
+    def acquire(self):
+        """Block until one request may be sent."""
+        if self.rate is None:
+            with self.lock:
+                self.requests += 1
+            return
+        while True:
+            with self.lock:
+                now = monotonic()
+                self.tokens = min(self.burst,
+                                  self.tokens + (now - self.updated) * self.rate)
+                self.updated = now
+                if self.tokens >= 1.0:
+                    self.tokens -= 1.0
+                    self.requests += 1
+                    return
+                wait = (1.0 - self.tokens) / self.rate
+            self.throttled += wait
+            sleep(wait)
+
+    def penalise(self):
+        """A 429 came back: halve the working rate, floor at ADAPTIVE_FLOOR."""
+        with self.lock:
+            self.rejections += 1
+            self.last_reject = monotonic()
+            if self.rate is None:
+                self.rate = self.target or 20.0
+            self.rate = max(ADAPTIVE_FLOOR, self.rate / 2.0)
+            self.tokens = 0.0
+            print(f"  rate governor: 429 -> ceiling now {self.rate:.1f} req/s")
+
+    def recover(self):
+        """Climb back toward the configured target once 429s stop.
+
+        Called once per cycle rather than per request, so recovery is paced by
+        the heat and not by how chatty a single cycle happened to be.
+        """
+        with self.lock:
+            if self.target is None or self.rate is None or self.last_reject is None:
+                return
+            if self.rate >= self.target:
+                return
+            if monotonic() - self.last_reject < 5.0:
+                return
+            # +25% per cycle: ~10 cycles from the floor back to a 40/s target.
+            self.rate = min(self.target, self.rate * 1.25)
+
+    def stats(self):
+        with self.lock:
+            return {"requests": self.requests,
+                    "throttled_s": round(self.throttled, 2),
+                    "rejections": self.rejections,
+                    "rate": self.rate}
+
+
+GOVERNOR = RateGovernor()
+
+
+# ============================================================================
+# CONCURRENCY
+# ============================================================================
+#
+# The seven reads that open a cycle are independent of each other, but were
+# issued one after another, so the cycle paid seven serial round trips. On the
+# logged runs that was ~465ms of the ~965ms cycle.
+#
+# Two separate costs came out of that, and only the first is obvious:
+#   1. the cycle is slow, so we look at the market ~1.1x per tick;
+#   2. the arb legs are sent from a book that was read at the TOP of the cycle
+#      and is by then several round trips stale. Measured over 2,094 clearing
+#      observations, an edge worth +0.0777/unit when observed is worth
+#      -0.0325/unit one second later, and only 42.6% still clear the bar.
+#
+# Fanning the reads out across a thread pool collapses the snapshot to roughly
+# one round trip, which addresses both.
+
+PARALLEL_FETCH = True
+FETCH_WORKERS = 8
+
+# Fire the arb on the snapshot that opens the cycle, rather than after the
+# tender pass, the unwind and the FX hedge have each cost a round trip.
+# See step_once for the measurement; False restores the pre-v28 ordering.
+ARB_FIRST = True
+
+# requests.Session is not documented thread-safe, so each worker gets its own.
+# They share nothing but the auth header, which is computed once.
+_local = threading.local()
+_session_headers = {}
+
+
+def worker_session():
+    s = getattr(_local, "session", None)
+    if s is None:
+        s = requests.Session()
+        s.headers.update(_session_headers)
+        _local.session = s
+    return s
+
+
+def register_session_headers(session):
+    """Let worker threads build sessions that authenticate like the main one."""
+    global _session_headers
+    _session_headers = dict(session.headers)
+
+
+_POOL = None
+
+
+def pool():
+    global _POOL
+    if _POOL is None:
+        _POOL = ThreadPoolExecutor(max_workers=FETCH_WORKERS,
+                                   thread_name_prefix="fetch")
+    return _POOL
+
+
+def parallel(calls):
+    """Run {name: (fn, args...)} concurrently, return {name: result}.
+
+    An exception in one call is re-raised to the caller, so a failed snapshot
+    is handled by the existing per-cycle ApiException path rather than silently
+    producing a half-filled snapshot to trade on.
+    """
+    if not PARALLEL_FETCH or len(calls) == 1:
+        return {k: c[0](*c[1:]) for k, c in calls.items()}
+    futures = {k: pool().submit(c[0], *c[1:]) for k, c in calls.items()}
+    return {k: f.result() for k, f in futures.items()}
+
+
 def handle_rate_limit(response):
     if response.status_code == 429:
-        wait_time = float(response.headers.get('Retry-After', response.json().get('wait', 1)))
+        GOVERNOR.penalise()
+        try:
+            fallback = response.json().get('wait', 1)
+        except ValueError:
+            fallback = 1
+        wait_time = float(response.headers.get('Retry-After', fallback))
         print(f"Rate limit exceeded. Waiting {wait_time}s before retrying.")
         sleep(wait_time)
         return True
@@ -149,7 +342,15 @@ HTTP_TIMEOUT = 10
 
 def api_request(session, method, endpoint, params=None):
     attempt = 0
+    # Off the main thread a real requests.Session must not be shared, so the
+    # worker uses its own. A fake session injected by sim_unwind.py / the test
+    # suites is left alone - it is the thing under test, and it is the only way
+    # those harnesses see the calls the bot makes.
+    if (isinstance(session, requests.Session)
+            and threading.current_thread() is not threading.main_thread()):
+        session = worker_session()
     while True:
+        GOVERNOR.acquire()
         url = f"{API_ENDPOINT}/{endpoint}"
         try:
             if method == 'GET':
@@ -634,10 +835,21 @@ ARB_THRESHOLD_CAD = 0.07
 #             of gross and refusing 40,119 USD of tenders in one heat.
 #   v28_nodoubledown - a tender that adds to same-direction inventory must
 #             clear a bar 0.04 higher. Tail control; the mean is neutral.
-RISK_MODEL = "v27_holdall"
-RISK_MODEL_DESC = "hold every tender to close-out (unwind costs 3x what was assumed); bar 0.08 vs mid"
+RISK_MODEL = "v29_ratelimit"
+RISK_MODEL_DESC = ("v27 hold-all, plus concurrent snapshot, arb fired first, "
+                   "and a governed request budget at REQ_PER_SEC")
 
-LOOP_SLEEP = 0.5    # between cycles inside a heat (~8 requests per cycle)
+# Floor on the gap between cycles. With the request ceiling lifted the pacing
+# job belongs to the governor, which knows the budget; this is only here so a
+# degenerate cycle (every read served from an empty book, nothing to do) cannot
+# spin the loop at thousands of iterations a second. 0.0 hands pacing entirely
+# to REQ_PER_SEC.
+LOOP_SLEEP = 0.02
+# Cap on cycles per tick. Past this we are re-reading a book that has not
+# changed and spending budget that the tender pass and the unwind want more.
+# Measured: tenders live a median of 6 ticks and we currently look at them 3
+# times in that window, so the useful range is single digits, not hundreds.
+MAX_CYCLES_PER_TICK = 8
 WAIT_POLL = 2.0     # between polls while waiting for the next heat
 
 LOG_DIR = Path(__file__).resolve().parent / "logs"
@@ -1858,7 +2070,22 @@ def execute_arb(session, logs, heat, tick, direction, edge, legs, snap):
 # ============================================================================
 
 def step_once(session, logs, heat, tick, bases, cycle, st, mm=None):
-    books = {t: fetch_book(session, t) for t in (BULL, BEAR, RITC, USD)}
+    # The four books, the position map and the NLV are independent reads, so
+    # they go out together. Serially this was six round trips (~350ms on the
+    # logged runs) before a single decision could be made; concurrently it is
+    # about one, which is what makes the arb gate below fire on a fresh book.
+    fetched = parallel({
+        BULL: (fetch_book, session, BULL),
+        BEAR: (fetch_book, session, BEAR),
+        RITC: (fetch_book, session, RITC),
+        USD: (fetch_book, session, USD),
+        "positions": (positions_map, session),
+        "nlv": (get_nlv, session),
+    })
+    books = {t: fetched[t] for t in (BULL, BEAR, RITC, USD)}
+    pos, quotes = fetched["positions"]
+    nlv = fetched["nlv"]
+
     bull_bid, bull_ask = top_of_book(books[BULL])
     bear_bid, bear_ask = top_of_book(books[BEAR])
     ritc_bid_usd, ritc_ask_usd = top_of_book(books[RITC])
@@ -1884,16 +2111,48 @@ def step_once(session, logs, heat, tick, bases, cycle, st, mm=None):
         "edge1": round(edge1, 6), "edge2": round(edge2, 6),
     }
 
-    pos, quotes = positions_map(session)
-    tenders_seen, tenders_accepted = handle_tenders(
-        session, logs, heat, tick, snap, quotes, pos, books, st)
-
     gross, net, ok = risk_metrics(pos)
-    nlv = get_nlv(session)
 
     # Bar to clear = fees (FX-dependent) + calibrated slippage allowance.
     req1 = calibration.required_edge(bases["basket_rich"], usd_ask)
     req2 = calibration.required_edge(bases["etf_rich"], usd_bid)
+
+    # The arb goes FIRST, on the snapshot that was just read.
+    #
+    # It used to go last, after the tender pass, the unwind, the prehedge
+    # unwind, the market maker and the FX hedge - every one of them a round
+    # trip, and several of them order placements. The edge it was acting on was
+    # by then the oldest thing in the cycle. Measured over 2,094 clearing
+    # observations in logs/ticks.csv, an edge worth +0.0777/unit when read is
+    # worth -0.0325/unit one second later and only 42.6% of them still clear
+    # the bar, so that ordering was giving away most of what it had found.
+    #
+    # Nothing below needs to run before it: the gate reads `ok` from the same
+    # position map the rest of the cycle uses, and ORDER_QTY of headroom is
+    # already reserved by the projected-gross check in risk_metrics.
+    #
+    # ARB_FIRST is a real switch and not just documentation: this ships without
+    # a live heat behind it, so the old ordering has to remain one assignment
+    # away, and bench_ratelimit.py needs both orderings to compare them.
+    state = {"traded": False, "direction": ""}
+
+    def fire_arb():
+        if edge1 >= req1 and ok:
+            state["direction"] = "basket_rich"
+            execute_arb(session, logs, heat, tick, "basket_rich", edge1,
+                        [(BULL, "SELL"), (BEAR, "SELL"), (RITC, "BUY")], snap)
+            state["traded"] = True
+        elif edge2 >= req2 and ok:
+            state["direction"] = "etf_rich"
+            execute_arb(session, logs, heat, tick, "etf_rich", edge2,
+                        [(BULL, "BUY"), (BEAR, "BUY"), (RITC, "SELL")], snap)
+            state["traded"] = True
+
+    if ARB_FIRST:
+        fire_arb()
+
+    tenders_seen, tenders_accepted = handle_tenders(
+        session, logs, heat, tick, snap, quotes, pos, books, st)
 
     unwind_action, unwind_qty = unwind_ritc(
         session, pos, books[RITC], snap, logs, heat, tick, cycle, st)
@@ -1909,18 +2168,10 @@ def step_once(session, logs, heat, tick, bases, cycle, st, mm=None):
             print(f"  MM cycle failed: {e}")
     fx_action, fx_qty = hedge_fx(session, pos)
 
-    traded = False
-    direction = ""
-    if edge1 >= req1 and ok:
-        direction = "basket_rich"
-        execute_arb(session, logs, heat, tick, direction, edge1,
-                    [(BULL, "SELL"), (BEAR, "SELL"), (RITC, "BUY")], snap)
-        traded = True
-    elif edge2 >= req2 and ok:
-        direction = "etf_rich"
-        execute_arb(session, logs, heat, tick, direction, edge2,
-                    [(BULL, "BUY"), (BEAR, "BUY"), (RITC, "SELL")], snap)
-        traded = True
+    if not ARB_FIRST:
+        fire_arb()
+    traded = state["traded"]
+    direction = state["direction"]
 
     row = {
         "run_id": RUN_ID, "risk_model": RISK_MODEL, "heat": heat, "tick": tick, "ts": now_iso(),
@@ -2037,6 +2288,8 @@ def run_heat(session, logs, heat, margins, prev_bases):
     first_tick = None
     last_tick = None
     cycles = arbs = tenders_seen = tenders_accepted = 0
+    prev_tick = None
+    cycles_this_tick = 0
     nlv_end = nlv_start
     st = UnwindState()
     mm = MMState()
@@ -2067,6 +2320,19 @@ def run_heat(session, logs, heat, margins, prev_bases):
             first_tick = tick
         last_tick = tick
 
+        # Budget spent inside one tick. The book only moves so often, and the
+        # tender pass and the unwind are the things that actually want the
+        # requests, so past MAX_CYCLES_PER_TICK we wait for the tick to turn
+        # rather than re-reading an unchanged book.
+        if tick == prev_tick:
+            cycles_this_tick += 1
+            if cycles_this_tick >= MAX_CYCLES_PER_TICK:
+                sleep(LOOP_SLEEP)
+                continue
+        else:
+            prev_tick = tick
+            cycles_this_tick = 1
+
         try:
             (traded, e1, e2, nlv, t_seen, t_acc,
              req1, req2) = step_once(session, logs, heat, tick, bases, cycles, st, mm)
@@ -2087,6 +2353,7 @@ def run_heat(session, logs, heat, margins, prev_bases):
         print(f"heat={heat} tick={tick} e1={e1:+.4f}/{req1:.3f} "
               f"e2={e2:+.4f}/{req2:.3f} nlv={nlv_str}{flag}")
 
+        GOVERNOR.recover()
         sleep(LOOP_SLEEP)
 
     # The case wipes open orders on reset, but leaving one resting across the
@@ -2125,6 +2392,11 @@ def run_heat(session, logs, heat, margins, prev_bases):
           f"{arbs} arbs, {tenders_seen} tenders, P&L {pnl} ===")
     print(f"    unwind {unwound:,.0f} units: {share:.0%} passive, "
           f"{saved:,.0f} CAD of fees saved vs crossing everything")
+    g = GOVERNOR.stats()
+    span = max(1, (last_tick or 0) - (first_tick or 0) + 1)
+    print(f"    requests {g['requests']:,} cumulative, {cycles/span:.1f} cycles/tick, "
+          f"ceiling {g['rate']}, {g['rejections']} rate-limit rejections, "
+          f"{g['throttled_s']}s self-throttled")
     return margins, bases
 
 
@@ -2151,6 +2423,8 @@ def main():
     try:
         with requests.Session() as s:
             s.headers.update(authorization())
+            # Worker threads build their own Sessions; they need the same auth.
+            register_session_headers(s)
             while not shutdown:
                 if wait_for_active(s) is None:
                     break
