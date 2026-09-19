@@ -1166,6 +1166,37 @@ duplicate quotes, repricing, fill booking including a fill that races a
 cancel, leaning on fair value, the inventory cap, pausing without dumping, the
 blocked-tender flatten, the tender-inventory flatten, and the kill switch.
 
+## `v26_mmoff` - market making off after one live heat
+
+v25's first full heat answered the question the replay could not. Quotes fill
+readily - 61 passive fills, 159,996 units, no API errors - but they fill on the
+wrong side of the next move:
+
+| after our fill | move in our favour, USD/unit | fills in our favour |
+|---|---|---|
+| immediately | +0.0075 | 72% |
+| +1 tick | +0.0084 | 57% |
+| +5 ticks | -0.0229 | 34% |
+| +20 ticks | -0.0212 | 45% |
+| +50 ticks | +0.0045 | 50% |
+
+Quoting inside the spread starts each fill ~0.008 ahead of the mid, and the
+rebate adds 0.01, but within five ticks the price has moved ~0.023 against us.
+Inventory pinned at the +9,000 cap buying into a falling price, and the kill
+switch stopped it at -5,179 CAD. The move partly reverts by 50 ticks, but the
+cap and the flattens realise the loss first.
+
+One heat, and fills cluster in trends, so this is not settled - but it is a
+measured mechanism rather than an inference, and at up to ~5,000 a heat it
+costs more than v24's swap gains. Switched off; the code and `test_mm.py` stay.
+Tender results in that heat were unaffected in any way that could be
+attributed: 5 of 8 accepted, expected edge +43,580, and the heat's -30,459 is
+mostly held-inventory drift.
+
+**Next variant, if revisited:** quote at or outside the touch rather than
+inside it, so fills come only on larger moves and pay a wider spread each -
+fewer fills, less adverse selection. It needs its own live test.
+
 ## Known open items
 
 - ~~`basket_rich` is negative (−0.0218/unit over 8 arbs)~~ — **RETRACTED.**

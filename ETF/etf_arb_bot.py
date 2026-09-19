@@ -501,7 +501,12 @@ SWAP_MARGIN = 1_000   # dump this much beyond the bare minimum, for rounding
 # quotes only while no tender inventory is held and no tender is on offer, and
 # flattens at market the moment one appears (at most ~9,000 units, ~500 USD).
 # A loss of MM_MAX_LOSS in a heat switches it off for the rest of that heat.
-MM_ENABLED = True
+# OFF after the v25 live test. One full heat: 61 passive fills, 160,000 units,
+# P&L -5,179 CAD (kill switch). Markout showed adverse selection: fills start
+# +0.008/unit against the mid but are -0.023 five ticks later (34% favourable),
+# larger than the spread plus rebate earned (~0.018). The code stays for a
+# variant that quotes at or outside the touch instead of inside it.
+MM_ENABLED = False
 MM_SIZE = 3_000
 MM_MAX_INV = 9_000
 MM_LEAN = 0.05            # USD premium/discount to fair value before leaning
@@ -559,8 +564,8 @@ ARB_THRESHOLD_CAD = 0.07
 #   v21_grossreserve - the arb may only use gross that no tender needs. It was
 #             net-neutral and invisible to every net check while holding 224,000
 #             of gross and refusing 40,119 USD of tenders in one heat.
-RISK_MODEL = "v25_mmtest"
-RISK_MODEL_DESC = "v24 plus: live test of passive RITC market making while tenders are idle"
+RISK_MODEL = "v26_mmoff"
+RISK_MODEL_DESC = "v24 behaviour: market making switched off after its live test"
 
 LOOP_SLEEP = 0.5    # between cycles inside a heat (~8 requests per cycle)
 WAIT_POLL = 2.0     # between polls while waiting for the next heat
