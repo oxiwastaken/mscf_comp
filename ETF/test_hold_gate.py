@@ -127,6 +127,28 @@ def main():
           f"synthetic {synth:+.4f} >= logged {real:+.4f}, so the unlocked count "
           f"below is an upper bound")
 
+    # The two bars sit on different measurements, so the only honest comparison
+    # is on the underlying price-minus-mid basis. v15 got this backwards in
+    # writing - it claimed the held bar was the stricter of the two while the
+    # unwound bar was 0.08, when it was in fact the looser. Asserted here so
+    # the relationship is checked rather than asserted in prose.
+    BE_UNWOUND = 0.0138          # sweep_tenderbar.py, two estimators agreeing
+    BE_HELD = 0.0                # close-out is free against the mid
+    req_unwound = bot.MIN_TENDER_EDGE + real
+    req_held = bot.MIN_TENDER_EDGE_HELD
+    margin_unwound = req_unwound - (BE_UNWOUND + real)
+    margin_held = req_held - BE_HELD
+    print(f"\n  on the price-minus-mid basis:")
+    print(f"    unwound bar {bot.MIN_TENDER_EDGE:.3f} -> needs {req_unwound:.4f}, "
+          f"break-even {BE_UNWOUND + real:.4f}, margin {margin_unwound:+.4f}")
+    print(f"    held bar    {bot.MIN_TENDER_EDGE_HELD:.3f} -> needs {req_held:.4f}, "
+          f"break-even {BE_HELD:.4f}, margin {margin_held:+.4f}")
+    check("both bars clear their own break-even",
+          margin_unwound > 0 and margin_held > 0,
+          f"unwound {margin_unwound:+.4f}, held {margin_held:+.4f}")
+    check("the held bar demands less raw edge, as it should - it has no exit cost",
+          req_held < req_unwound, f"held {req_held:.4f} vs unwound {req_unwound:.4f}")
+
     # 4: the tenders this actually unlocks, and 5: the bad ones still refused.
     # Deduped by tender: each one is logged once per cycle of its ~6 cycle life.
     unlocked, still_refused, bad = {}, set(), 0

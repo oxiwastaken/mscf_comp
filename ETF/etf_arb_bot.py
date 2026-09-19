@@ -195,30 +195,59 @@ LIMIT_BUFFER = 3000
 # The edge swings across a tender's ~5-tick life, so the gate is re-evaluated
 # each cycle and fires on a good one rather than the first one.
 #
-# RESTORED to 0.08 in v10. The 0.05 of v8/v9 was justified by a per-chunk
-# slippage figure of +0.0133/unit that turned out to measure the wrong thing
-# (see MAX_UNWIND_SLIP), so the break-even it implied was far too optimistic.
-# 0.08 is the bar v7 ran at while realising +0.235/unit.
+# 0.08 -> 0.04 in v19, on a break-even that is finally measured rather than
+# reasoned about. `sweep_tenderbar.py` estimates it two independent ways:
 #
-# Originally lowered from 0.10 when v6 started pricing the unwind at chunk VWAP. That
-# removed ~0.017/unit of phantom edge from the measurement, so an unchanged
-# 0.10 would have been materially stricter than the 0.10 that produced heat 2's
-# profitable 75% capture rate - a silent second tightening. 0.08 keeps the
-# effective bar where the evidence says it worked.
-MIN_TENDER_EDGE = 0.08
+#   structural  fee 0.0200 + execution 0.0550 - uplift 0.0612 = +0.0138
+#               (execution from 32 live tenders, uplift from 80 logged books)
+#   direct      mean of (gate edge - realised per unit)        = +0.0136
+#
+# They agree to 0.0002/unit. Combined: +0.0138, se 0.0058, 95% upper bound
+# +0.0252. The old 0.08 sat ELEVEN standard errors above break-even.
+#
+# 0.04 is chosen rather than the EV peak (0.02) because the curve is flat - every
+# bar from 0.00 to 0.05 earns within 1,000 USD/heat of the same amount - so the
+# right pick is the lowest value comfortably clear of break-even, not the
+# argmax. 0.04 is 4.5 se above it and, more to the point, above the 95% UPPER
+# bound of 0.0252: profitable even in the pessimistic case. Worth +3,019
+# USD/heat of the +3,255 available.
+#
+# Why this is not v8/v9 again. Those ran 0.05 and lost, but the bar was not what
+# lost: v8 (bar 0.05) and v10 (bar 0.08) leaked 7,582 and 7,871 USD/heat
+# respectively - indistinguishable - while v9's leak was 23,005 on the same
+# 0.05 bar. The variable was UNWIND_CHUNKS_PER_CYCLE, not the bar. That is back
+# to 1, and the exit is now cheaper than either of them had (v12 rests before
+# crossing, v14/v17 does not exit at all late in the heat).
+#
+# Earlier history: 0.10 -> 0.08 in v7 when v6 started pricing the unwind at
+# chunk VWAP, which removed ~0.017/unit of phantom edge from the MEASUREMENT
+# and would otherwise have tightened the effective bar silently.
+MIN_TENDER_EDGE = 0.04
 # Bar for a tender that will be HELD to close-out rather than unwound, priced
 # against the mid with no fee (see HOLD_TO_CLOSEOUT_TICK).
 #
-# The two bars are not comparable, because they sit on different measurements.
-# `MIN_TENDER_EDGE` is measured after subtracting a market unwind; this one is
-# not, and across 385 logged tenders that difference is worth +0.0626/unit on
-# average (median +0.0550, p10 +0.0250). So 0.04 here is a materially STRICTER
-# requirement than 0.08 there, not a looser one.
+# The two bars sit on different measurements and cannot be compared directly.
+# `MIN_TENDER_EDGE` is net of a market unwind; this one is not. Put both on the
+# underlying price-minus-mid basis, where the gate basis is 0.0612 lower:
 #
-# 0.04 because the risk on a held tender is not execution - there is none - but
-# that close-out lands on the wrong side of the book rather than at the mid.
-# One half-spread covers that, and the median RITC spread is 0.08. Drift to the
-# close is mean-zero (-0.0126/unit against a 0.0779 sd), so it needs no cushion.
+#   bar                        requires price-mid   break-even   margin
+#   MIN_TENDER_EDGE 0.04             >= 0.1012        0.0750     0.0262
+#   MIN_TENDER_EDGE_HELD 0.04        >= 0.0400        0.0000     0.0400
+#
+# CORRECTION to what v15 originally claimed here. It said 0.04-held was
+# "materially stricter than 0.08-unwound". That was backwards: at a 0.08
+# unwound bar the margins were 0.0662 unwound against 0.0400 held, so held was
+# the LOOSER of the two. The economics of v15 were right - a held tender needs
+# less edge because it has no exit cost - but the justification written for
+# them was not, and someone tuning these two numbers would have been misled.
+# Only after v19 dropped the unwound bar to 0.04 does held become the stricter
+# of the pair.
+#
+# 0.04 because the risk on a held tender is not execution - there is none, so
+# break-even is 0 - but that close-out lands on the wrong side of the book
+# rather than at the mid. One half-spread covers that, and the median RITC
+# spread is 0.08. Drift to the close is mean-zero (-0.0126/unit against a
+# 0.0779 sd), so it needs no cushion.
 #
 # Worth 11 tenders and ~3,017 USD/heat across the logged history: tenders like
 # +0.0086 on 93,000 units that the unwind-priced bar refused, which are
@@ -437,8 +466,13 @@ ARB_THRESHOLD_CAD = 0.07
 #             ratchet into reaching for the arb's hedge leg.
 #   v17_holdtick - hold threshold moved 200 -> 175, chosen by worst-case
 #             regret once only same-direction tenders are counted as blocked.
-RISK_MODEL = "v17_holdtick"
-RISK_MODEL_DESC = "v16 plus: hold threshold 175, picked for robustness not the peak"
+#   v18_passivesize - PASSIVE_MAX_LIVE 1 -> 2; live passive share came in at
+#             ~60%, not the 12-15% simulated.
+#   v19_barmeasured - MIN_TENDER_EDGE 0.08 -> 0.04 on a break-even measured
+#             two independent ways (+0.0138, se 0.0058) rather than reasoned
+#             about; the old bar sat 11 se above it.
+RISK_MODEL = "v19_barmeasured"
+RISK_MODEL_DESC = "v18 plus: tender bar 0.04, set from a measured break-even of 0.0138"
 
 LOOP_SLEEP = 0.5    # between cycles inside a heat (~8 requests per cycle)
 WAIT_POLL = 2.0     # between polls while waiting for the next heat

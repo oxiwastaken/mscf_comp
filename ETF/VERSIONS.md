@@ -692,6 +692,80 @@ it cannot pin down and reports minimax regret rather than only the argmax.
 Drift is excluded by design and the reason is stated in the output, so nobody
 later mistakes its absence for an oversight.
 
+## `v19_barmeasured` — the tender bar, finally measured
+
+Every previous move of `MIN_TENDER_EDGE` (0.10 → 0.08 → 0.05 → 0.08) was
+reasoned about rather than measured. `sweep_tenderbar.py` estimates break-even
+two independent ways:
+
+| estimator | value | se | source |
+|-----------|-------|----|--------|
+| structural | +0.0138 | 0.0061 | fee 0.0200 + execution 0.0550 − uplift 0.0612 |
+| direct | +0.0136 | 0.0187 | mean of (gate edge − realised), 32 live tenders |
+| **combined** | **+0.0138** | **0.0058** | 95% upper bound **+0.0252** |
+
+They agree to **0.0002/unit**, from completely different data — execution from
+32 live unwinds, uplift from 80 logged tender books. The old bar of 0.08 sat
+**eleven standard errors above break-even**.
+
+Expected value by bar, over 234 distinct tenders in 39 heats:
+
+| bar | se above BE | tenders/heat | EV USD/heat | sd | vs 0.08 |
+|-----|-------------|--------------|-------------|----|---------|
+| 0.02 | 1.1 | 4.31 | 41,679 | 18,762 | +3,255 |
+| 0.03 | 2.8 | 4.15 | 41,597 | 18,422 | +3,174 |
+| **0.04** | **4.5** | **4.05** | **41,442** | **18,183** | **+3,019** |
+| 0.05 | 6.2 | 3.82 | 40,906 | 17,614 | +2,482 |
+| 0.08 | 11.4 | 3.23 | 38,424 | 16,227 | +0 |
+
+**0.04, not the 0.02 peak.** The curve is flat — every bar from 0.00 to 0.05
+earns within 1,000 USD/heat of the same amount — so the right choice is the
+lowest value comfortably clear of break-even, not the argmax. 0.04 is 4.5 se
+above it and, more usefully, above the **95% upper bound** of 0.0252: it stays
+profitable even in the pessimistic case. It captures +3,019 of the +3,255
+available while taking the fewest marginal, highest-variance tenders.
+
+**Why this is not v8/v9 again.** Those ran 0.05 and lost. The bar was not what
+lost: v8 (bar 0.05) leaked 7,582 USD/heat and v10 (bar 0.08) leaked 7,871 —
+indistinguishable — while v9 leaked 23,005 on the same 0.05 bar as v8. The
+variable was `UNWIND_CHUNKS_PER_CYCLE`, not the bar. It is back to 1, and the
+exit is now cheaper than either of them had: v12 rests before crossing, and
+v14/v17 does not exit at all late in the heat.
+
+### Correction to v15
+
+v15 justified `MIN_TENDER_EDGE_HELD = 0.04` by claiming it was "a materially
+**stricter** requirement than 0.08 on the unwind basis, not a looser one."
+**That was backwards.** On the shared price-minus-mid basis:
+
+| bar | requires price−mid | break-even | margin |
+|-----|--------------------|------------|--------|
+| unwound 0.08 (v15-era) | ≥ 0.1412 | 0.0750 | 0.0662 |
+| unwound 0.04 (now) | ≥ 0.1012 | 0.0750 | 0.0262 |
+| held 0.04 | ≥ 0.0400 | 0.0000 | 0.0400 |
+
+At a 0.08 unwound bar the held bar was the **looser** of the two, not the
+stricter. The economics of v15 were right — a held tender needs less edge
+because it has no exit cost — but the argument given for them was wrong, and
+anyone tuning the pair would have been misled. Only now that the unwound bar is
+0.04 does held become the stricter of the two.
+
+`test_hold_gate.py` now asserts the relationship on the shared basis rather
+than leaving it to prose.
+
+### Two things ruled out, cheaply
+
+- **Accept timing.** The gate re-scores a tender every cycle of its ~6-cycle
+  life. Measured shortfall between the edge we accepted at and the best edge
+  available in that life: **0.0000/unit over 44 accepts.** A first-crossing
+  rule against a high bar only crosses when the edge spikes, so it is already
+  taking the peak. The edge trajectory is flat too (median change 0.0000 from
+  first sighting to last), so there is nothing to wait for.
+- **Size-dependent bar.** Leak does rise with tender size — bucket means run
+  −0.0405 at 70k to +0.0378 at 100k — but the slope is +0.0033 per 10,000 units
+  at **t = 1.57**, and over the whole 70k–100k range it moves the bar by 0.010.
+  Not worth the complexity on that evidence.
+
 ---
 
 ## `v18_livepassive` — first live results for v12-v17, and what they say
