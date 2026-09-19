@@ -39,7 +39,12 @@ BASE = {'structure.WING_MAX_VEGA_RATIO': 1.0,
         'structure.WING_STALE_RATIO': 0.90,
         'STRIKE_SWITCH_DISTANCE': 1.5,
         'STAND_DOWN_CLOSES': True,
-        'GAP_SMOOTHING': 0.10}
+        'GAP_SMOOTHING': 0.10,
+        # Re-run WITH the pin fix. The original 375 recommendation rested on
+        # 750 carrying a worse tail, and the pin fix removed that exact loss
+        # mechanism - so the comparison has to be made again rather than
+        # inherited.
+        'STRUCTURE_OFF_AFTER': 0.80}
 
 CANDIDATES = (
     ('straddle only', {'structure.WING_CONTRACTS': 0}),

@@ -1,0 +1,10 @@
+
+  170 recordings, policy ratchet+news
+
+  config                  mean         sd      worst  losers  10-heat p05        p50  P(>=120k)  P(>=150k)
+  straddle only    $   132,542 $   64,699 $   -9,722    1/170 $    100,429 $  132,076     72.5%     19.4%
+  structure 750    $   138,022 $   78,967 $  -43,943    5/170 $     98,630 $  137,713     76.1%     31.0%
+                   vs straddle    +5,480 backtest (t 2.7)  ~  +3,754 live-adjusted
+  structure 375    $   133,624 $   65,934 $   -9,722    1/170 $    100,795 $  133,180     73.8%     21.2%
+                   vs straddle    +1,082 backtest (t 2.6)  ~    +741 live-adjusted
+

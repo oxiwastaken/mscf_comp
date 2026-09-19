@@ -1006,7 +1006,27 @@ standard deviation, introduces the only losing heats in the sample, and doubles
 the orders per resize. 375 is smaller, significant, variance-neutral and
 faster to execute.
 
-**NOT changed yet, deliberately.** The live runner is midway through a clean
+**RETRACTED 18 Sep, 22:45 — keep 750.** That recommendation rested on 750
+carrying a worse tail, and the pin fix (`STRUCTURE_OFF_AFTER`) removed exactly
+that loss mechanism. Re-measured over 170 recordings with the fix in place:
+
+```
+                    mean        sd      worst  losers  10-heat p05   P(>=150k)
+straddle only   $132,542   $64,699    -$9,722   1/170     $100,429      19.4%
+structure 750   $138,022   $78,967   -$43,943   5/170      $98,630      31.0%
+structure 375   $133,624   $65,934    -$9,722   1/170     $100,795      21.2%
+```
+
+750 went from +$2,243 (t 1.5, not significant) to +$5,480 (t 2.7) once the pin
+was handled. The per-heat standard deviation is still higher, and on a single
+heat that matters - but the competition scores the MEAN OF TEN, and there the
+extra variance washes out: p05 of the ten-heat average is $98,630 against
+$100,795, which is noise, while the mean advantage persists. P(ten-heat average
+>= $150k) is 31.0% against 21.2%.
+
+Decide on the metric you are paid on. Original reasoning kept below.
+
+**NOT changed at the time, deliberately.** The live runner is midway through a clean
 sample on 750 ($138,919 over 26 heats, no losers) and switching mid-run would
 fragment it. Change the one constant in `structure.py` when that sample is
 long enough, or if the competition is close enough that the tail matters more
