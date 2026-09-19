@@ -46,9 +46,33 @@ def builds():
     return rows
 
 
-def build_of(finished, history):
-    """Which build was trading when a heat finished."""
-    when = datetime.datetime.fromisoformat(finished)
+def started_at(row):
+    """
+    When a heat BEGAN, which is the only time that decides what it traded.
+
+    `overnight.py` spawns a fresh trader at the start of each heat, so a heat
+    runs whatever was on disk then - not what is on disk when it ends, six and
+    a half minutes later. Attributing by finish time credits a commit with a
+    heat that had already been trading for minutes before it landed.
+
+    The tag IS the start time, as HHMMSS. It carries no date, so take the date
+    from `finished` and step back a day when the heat ran through midnight.
+    """
+    finished = datetime.datetime.fromisoformat(row['finished'])
+    tag = row['tag']
+    try:
+        clock = datetime.time(int(tag[0:2]), int(tag[2:4]), int(tag[4:6]))
+    except (ValueError, IndexError):
+        return finished
+    start = datetime.datetime.combine(finished.date(), clock)
+    if start > finished:
+        start -= datetime.timedelta(days=1)
+    return start
+
+
+def build_of(row, history):
+    """Which build was on disk when this heat started."""
+    when = started_at(row)
     for stamp, sha, subject in history:      # newest first
         if when >= stamp:
             return sha, subject
@@ -136,7 +160,7 @@ def main():
     if history:
         groups = {}
         for row in every:
-            sha, subject = build_of(row['finished'], history)
+            sha, subject = build_of(row, history)
             groups.setdefault((sha, subject), []).append(int(row['nlv']))
         print('\n  by build (a live-path commit starts a new one):')
         for (sha, subject), values in list(groups.items())[-6:]:
