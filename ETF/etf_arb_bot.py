@@ -68,6 +68,14 @@ AUTHORIZATION = {'Authorization': 'Basic ' + base64.b64encode(f"{USERNAME}:{PASS
 
 shutdown = False
 
+# RITC acquired from tenders, signed, reset each heat. The unwind targets THIS
+# rather than the raw RITC position: the arb's ETF leg is a hedge against its
+# own BULL/BEAR legs, and selling it off turns a hedged arb into a naked short
+# basket. That is exactly what happened in v10 heat 4 - the arb bought 5,000
+# RITC per cycle, the unwind sold it straight back, RITC sat flat at 7,000
+# while BULL/BEAR ran to -20,000 each and NLV fell ~9,000 in ten ticks.
+tender_position = 0
+
 
 class ApiException(Exception):
     pass
@@ -239,8 +247,8 @@ ARB_THRESHOLD_CAD = 0.07
 #             cycle; tender accept fixed (see VERSIONS.md).
 #   v5_depthunwind - current. Unwind chunks sized to visible book depth and
 #             every unwind fill logged, to measure what the unwind costs.
-RISK_MODEL = "v10_revert"
-RISK_MODEL_DESC = "back to v7 unwind rate and bar; per-tender realised P&L now logged"
+RISK_MODEL = "v11_hedgesafe"
+RISK_MODEL_DESC = "unwind targets tender inventory only, never the arb hedge leg"
 
 LOOP_SLEEP = 0.5    # between cycles inside a heat (~8 requests per cycle)
 WAIT_POLL = 2.0     # between polls while waiting for the next heat
@@ -467,15 +475,23 @@ def unwind_ritc(session, pos, book, snap, logs, heat, tick):
     Chunking at the 10k per-order maximum and spreading it over cycles is what
     keeps the price impact of that unwind survivable.
     """
+    global tender_position
+    # Only tender-derived inventory is unwound. Clamp to the live position so a
+    # stale tracker can never drive trades in the wrong direction.
     ritc = int(pos.get(RITC, 0))
-    if abs(ritc) <= UNWIND_THRESHOLD:
+    target = tender_position
+    if target > 0:
+        target = min(target, max(ritc, 0))
+    elif target < 0:
+        target = max(target, min(ritc, 0))
+    if abs(target) <= UNWIND_THRESHOLD:
         return None, 0
-    action = "SELL" if ritc > 0 else "BUY"
+    action = "SELL" if target > 0 else "BUY"
     avail = depth_within(book, "bid" if action == "SELL" else "ask")
     ref_bid, ref_ask = top_of_book(book)
     ref = ref_bid if action == "SELL" else ref_ask
 
-    remaining = abs(ritc) - UNWIND_THRESHOLD
+    remaining = abs(target) - UNWIND_THRESHOLD
     sent = 0
     for _ in range(UNWIND_CHUNKS_PER_CYCLE):
         if remaining <= 0:
@@ -496,6 +512,7 @@ def unwind_ritc(session, pos, book, snap, logs, heat, tick):
         remaining -= qty
         avail = max(avail - qty, 0)
         sent += qty
+        tender_position -= qty if action == "SELL" else -qty
         if slip is not None and slip > MAX_UNWIND_SLIP:
             print(f"    slip {slip:+.4f} > {MAX_UNWIND_SLIP} - holding the rest for next cycle")
             break
@@ -661,6 +678,10 @@ def handle_tenders(session, logs, heat, tick, snap, quotes, pos, books):
                                params={"price": offer.get('price')})
             ok = resp is not None
             err = ""
+            if ok:
+                global tender_position
+                q = float(offer.get("quantity") or 0)
+                tender_position += q if (offer.get("action") or "").upper() == "BUY" else -q
         except ApiException as e:
             ok, err = False, str(e)[:200]
         accepted += 1 if ok else 0
@@ -866,6 +887,8 @@ def run_heat(session, logs, heat, margins, prev_bases):
     cycles = arbs = tenders_seen = tenders_accepted = 0
     nlv_end = nlv_start
 
+    global tender_position
+    tender_position = 0   # positions are closed out at heat end
     print(f"=== heat {heat} starting (NLV {nlv_start}) ===")
     bases, margins = calibrate_for_heat(logs, heat, margins, prev_bases)
 

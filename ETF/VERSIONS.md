@@ -223,6 +223,35 @@ the full unwind VWAP — and writes `logs/tender_pnl.csv`.
 Lesson worth keeping: a metric that only sees one instant cannot price an
 action whose cost accrues across many.
 
+## `v11_hedgesafe` — the unwind was eating the arb's hedge
+
+v10 heat 4 ran to -15,162. The tender gate was behaving correctly (skipping at
+-0.01 against the 0.08 bar), and both arb directions score positive over full
+history, so neither was the cause. The position trace was:
+
+    tick 128: bull  -5,000  bear  -5,000  ritc 7,000  unwind SELL 5,000
+    tick 129: bull -10,000  bear -10,000  ritc 7,000  unwind SELL 5,000
+    tick 135: bull -15,000  bear -15,000  ritc 7,000  unwind SELL 5,000
+    tick 136: bull -20,000  bear -20,000  ritc 7,000  unwind SELL 5,000
+
+`unwind_ritc` worked off the raw RITC position, so it could not tell tender
+inventory from the arb's ETF hedge leg. Each basket_rich arb bought 5,000 RITC
+to hedge its short BULL/BEAR, and the unwind sold that hedge straight back on
+the next cycle. RITC sat flat at 7,000 while the short basket grew without
+bound, turning a net-neutral arb into a naked directional short. NLV fell ~9,000
+across ten ticks, and the arb kept re-entering because on its own terms each
+trade still looked like edge.
+
+The unwind now tracks `tender_position` - signed RITC acquired from accepted
+tenders, reset each heat since positions close out - and targets only that,
+clamped to the live position so a stale tracker cannot drive trades the wrong
+way. The arb's hedge leg is left alone.
+
+Same root cause as the v8/v9 regression, one level up: a control acting on an
+aggregate it could not attribute. There, per-chunk slippage could not see cost
+accruing across cycles; here, raw RITC position could not see which strategy
+owned the inventory.
+
 ---
 
 ## Known open items
