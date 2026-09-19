@@ -904,7 +904,36 @@ live run is for.**
 
 Three findings, in order of how much they change the picture.
 
-### 1. The backtest is 1.46x optimistic. This is the big one.
+### 0. CORRECTION, 20:45 — it is 1.20x, not 1.46x, and 26 live heats say so
+
+The 1.46x below was measured over 91 heats spanning a whole day of different
+builds, including ones with known bugs and heats the trader joined half-way
+through. Restricted to the 26 heats traded by the frozen build 3532ba7
+(`python validate_build.py 180124`):
+
+```
+live mean        $138,919
+backtest mean    $167,150
+ratio                1.20x
+correlation          0.98
+live sd          $ 85,675
+live worst       $ 12,000      losing heats 0/26
+```
+
+**Correlation 0.98.** The backtest tracks live almost perfectly heat by heat
+and is simply scaled about 20% high. That matters far more than the level:
+every paired A/B comparison in this document is a RANKING question, and at 0.98
+the ranking is sound. Offline deltas translate at roughly 0.83x, not 0.68x.
+
+And the headline number: **live mean $138,919 over 26 heats, with a standard
+error of $16,802 - so a 95% interval of $106k to $172k. Zero losing heats.**
+$150k is inside that interval. The ten-heat average, which is what the
+competition scores, has a standard deviation of about $27,100.
+
+Read the 1.46x section below as a lesson about pooling across builds, not as a
+fact about the model.
+
+### 1. The backtest is 1.46x optimistic — SUPERSEDED, see above
 
 `python sweep.py --validate` over **91 matched heats** (live results.csv against
 the recording of the same heat):
