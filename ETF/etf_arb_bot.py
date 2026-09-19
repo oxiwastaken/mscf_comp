@@ -515,8 +515,8 @@ ARB_THRESHOLD_CAD = 0.07
 #   v21_grossreserve - the arb may only use gross that no tender needs. It was
 #             net-neutral and invisible to every net check while holding 224,000
 #             of gross and refusing 40,119 USD of tenders in one heat.
-RISK_MODEL = "v22_settlelag"
-RISK_MODEL_DESC = "v21 plus: tracker clamp confirmed over two reads, so settlement lag cannot strand a tender"
+RISK_MODEL = "v23_agreedclamp"
+RISK_MODEL_DESC = "v22 plus: a confirmed clamp writes back only the shrink both reads agree on"
 
 LOOP_SLEEP = 0.5    # between cycles inside a heat (~8 requests per cycle)
 WAIT_POLL = 2.0     # between polls while waiting for the next heat
@@ -869,7 +869,7 @@ class UnwindState:
         self.passive_qty = 0.0
         self.aggressive_qty = 0.0
         self.holding = False    # latched so the hold prints once, not every cycle
-        self.clamp_bound = False  # the tracker clamp bound on the previous cycle
+        self.clamp_bound = None   # target the tracker clamp gave last cycle, if it bound
 
     def reset(self):
         self.opened = None
@@ -921,6 +921,8 @@ def reconcile_tracker(tracker, ritc, clamp_bound):
 
     Returns (target, tracker, clamp_bound, skip). `target` is what the unwind
     should work toward this cycle; `skip` means sit this cycle out.
+    `clamp_bound` is the target the clamp produced on the previous cycle, or
+    None if it did not bind then.
 
     v16 clamps the tracker to the live position and writes the clamp back, so
     inventory the arb's ETF leg moved without the unwind seeing it cannot linger
@@ -938,11 +940,17 @@ def reconcile_tracker(tracker, ritc, clamp_bound):
     edge on 71,000 units - were refused on gross. Limit refusals are worth
     ~13,500 USD/heat across the v21 sample; this is the preventable part.
 
-    So a binding clamp is believed only when it binds on two consecutive reads.
-    The first time, the tracker is kept and the unwind skips one cycle. A
-    transient read recovers by the next cycle and the tracker survives intact; a
-    real move by the arb persists and is written back one cycle later than v16
-    would, which is the whole cost.
+    So a binding clamp is believed only when it binds on two consecutive reads,
+    and then only as far as BOTH reads support - the milder of the two shrinks.
+    The first time, the tracker is kept and the unwind skips one cycle.
+
+    v22 wrote back the second read's value, which is wrong when the two binds
+    have different causes. v22 heat 2: a +84,000 BUY left the tracker at 82,000
+    against a real 77,000 (5,000 of arb residue - a legitimate bind), and the
+    next read was a settlement flicker to -7,000. Two consecutive binds, so v22
+    confirmed the flicker's value and wrote back 0; +77,000 then sat unhedged
+    from tick 165 to close-out. Taking the milder shrink writes back 77,000 -
+    the part both reads agree on - and the flicker has to confirm itself again.
     """
     target = tracker
     if target > 0:
@@ -950,10 +958,11 @@ def reconcile_tracker(tracker, ritc, clamp_bound):
     elif target < 0:
         target = max(target, min(ritc, 0))
     if target == tracker:
-        return target, tracker, False, False
-    if not clamp_bound:
-        return tracker, tracker, True, True
-    return target, target, True, False
+        return target, tracker, None, False
+    if clamp_bound is None:
+        return tracker, tracker, target, True
+    agreed = clamp_bound if abs(clamp_bound) >= abs(target) else target
+    return agreed, agreed, target, False
 
 
 def unwind_ritc(session, pos, book, snap, logs, heat, tick, cycle, st):

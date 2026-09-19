@@ -21,7 +21,7 @@ def check(name, ok, detail=""):
 
 def run(tracker, reads):
     """Feed live RITC reads through the reconcile; return the tracker path."""
-    bound, path = False, []
+    bound, path = None, []
     for ritc in reads:
         _, tracker, bound, _ = reconcile_tracker(tracker, ritc, bound)
         path.append(tracker)
@@ -54,16 +54,23 @@ check("...one cycle later than before, and no later",
       path[0] == -50_000 and path[1] == -20_000, f"path {path}")
 
 # The clamp must never push the tracker the wrong way or past the position.
-_, t, _, _ = reconcile_tracker(-50_000, 10_000, True)
+_, t, _, _ = reconcile_tracker(-50_000, 10_000, 0)
 check("tracker never flips sign on a crossing read", t == 0, f"got {t}")
-_, t, _, _ = reconcile_tracker(30_000, 90_000, True)
+_, t, _, _ = reconcile_tracker(30_000, 90_000, 30_000)
 check("tracker never grows past what was accepted", t == 30_000, f"got {t}")
 
 # A flicker that happens to land under the threshold must not reset the unwind.
-target, t, _, skip = reconcile_tracker(92_000, -2_000, False)
+target, t, _, skip = reconcile_tracker(92_000, -2_000, None)
 check("a sub-threshold flicker skips rather than resets",
       skip and t == 92_000 and abs(target) > UNWIND_THRESHOLD,
       f"target {target} tracker {t} skip {skip}")
+
+# v22 heat 2: a legitimate small bind (82,000 vs a real 77,000) immediately
+# followed by a settlement flicker. v22 confirmed the flicker's value and wrote
+# back 0, stranding +77,000 to close-out. Must write back only the agreed 77,000.
+path = run(82_000, [77_000, -7_000, 77_000, 77_000])
+check("small real bind then flicker writes back the agreed shrink, not the flicker",
+      path[1] == 77_000 and path[-1] == 77_000, f"path {path}")
 
 print(f"\n{failures} FAILED" if failures else "\nall passed")
 raise SystemExit(1 if failures else 0)

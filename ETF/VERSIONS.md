@@ -1031,6 +1031,30 @@ v17 heat 1, and checks v16's original case - a real arb move - is still shed.
 Run against the old logic, heat 13's sequence gives
 `[-89000, -5000, -5000, -5000, -5000]`: stranded, as observed live.
 
+## `v23_agreedclamp` — v22's debounce confirmed the wrong value
+
+v22's first live full heat caught its own bug. The first tender in v22 heat 2
+proved the fix: SELL 86,000 at tick 52, a settlement flicker to +10,000 at tick
+53, one skipped cycle, then a clean unwind to flat by tick 61. Under v21 that
+flicker would have stranded the position.
+
+The second tender broke it. BUY 84,000 at tick 164 left the tracker at 82,000
+against a real 77,000 - 5,000 of arb residue, a legitimate bind - and the next
+read was a settlement flicker to -7,000. v22 believed a clamp that bound on two
+consecutive reads and wrote back the *second* read's value, so the flicker was
+confirmed and the tracker went to 0. +77,000 then sat unhedged from tick 165 to
+close-out, swinging NLV by +/-14,000 with no UNWIND or PASSIVE line logged.
+
+Two binds in a row do not mean two reads agree - they can bind for different
+reasons. A confirmed clamp now writes back only the shrink both reads support,
+the milder of the two. Here that is 77,000; the flicker to 0 has to confirm
+itself again on its own and cannot.
+
+`test_reconcile.py` gains the heat-2 sequence. v22's logic on it gives
+`[82000, 0, 0, 0]`, stranded as observed live; v23 gives
+`[82000, 77000, 77000, 77000]`. v22's own regression cases were all flickers
+from an exactly-reconciled tracker, which is why they passed.
+
 ## Known open items
 
 - ~~`basket_rich` is negative (−0.0218/unit over 8 arbs)~~ — **RETRACTED.**
