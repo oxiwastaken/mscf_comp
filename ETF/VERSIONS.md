@@ -613,8 +613,37 @@ cap — because without it nothing exercised the pre-hedge end to end.
 - **Spread arb is ~822 CAD/heat**, not the ~10k previously recorded: 412 arbs
   over 62 heats at +0.0248/unit net of fees. Tenders are worth 10-50x that.
   Effort belongs on tender capture and exit choice.
-- **Nothing since v11 has run live.** v12–v15 are validated only against logged
-  data and the offline simulators. The passive fill *rate* in particular cannot
-  be measured from quote history — the logs carry no trade prints — so
-  `PASSIVE_MAX_LIVE` and `PASSIVE_CHUNK` are unsized by evidence. First live
-  heats should check `passive_share` in `heats.csv` before anyone tunes them.
+- **Nothing since v11 has run live.** v12–v16 are validated only against logged
+  data and the offline simulators, on a machine with no `.env`. Everything
+  below is a prediction until a heat says otherwise.
+
+### What to check on the first live heats
+
+Run the four suites first — they need no credentials and take seconds:
+
+    python sim_unwind.py && python test_prehedge.py \
+      && python test_hold_gate.py && python test_cycle.py
+
+Then, after one heat:
+
+| check | where | expected | if it disagrees |
+|-------|-------|----------|-----------------|
+| passive fills happen at all | `heats.csv` → `passive_share` | > 0 | 0 means limit orders never fill; set `PASSIVE_UNWIND = False` and v12 is simply off |
+| how much fills passively | same | 0.12–0.15 | much higher: raise `PASSIVE_MAX_LIVE`. Much lower: the rebate claim is dead, not the bot |
+| the rebate is real | `heats.csv` → `fee_saved` | ~0.03 × passive units | RIT may rebate differently than the case PDF states |
+| the hold fires | console → `HOLD … to close-out` | once, after tick 200 | never firing means no tender survives that late |
+| close-out is benign | `heat_pnl` on a heat that held vs one that did not | no systematic gap | a gap means close-out is NOT at the mid, and `MIN_TENDER_EDGE_HELD` must rise |
+| the pre-hedge reaches something | `tenders.csv` → `prehedge` | non-zero on ≥98,500 unit tenders | never firing means the net ceiling is not what we think |
+| the tracker stays honest | `ticks.csv` → `pos_ritc` vs the unwind's behaviour | no unwind while `pos_ritc` is small | v16 is what this guards |
+
+The single most important one is **close-out is benign**. v14 and v15 both rest
+on the case's statement that positions close out at the correct price with no
+commission. If that is wrong, both should be reverted — they are two isolated
+constants (`HOLD_TO_CLOSEOUT_TICK`, `MIN_TENDER_EDGE_HELD`) precisely so that
+reverting is a one-line change rather than an unpick.
+
+`PASSIVE_MAX_LIVE` and `PASSIVE_CHUNK` are the only parameters here **not**
+sized by evidence: passive fill *volume* cannot be measured from quote history
+because the logs carry no trade prints. Do not tune them against
+`sim_unwind.py`, whose fill model is invented — tune them against
+`passive_share` from a real heat.

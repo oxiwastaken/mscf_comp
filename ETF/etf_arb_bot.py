@@ -816,27 +816,35 @@ def passive_price(action, bid, ask):
 
 
 def unwind_ritc(session, pos, book, snap, logs, heat, tick, cycle, st):
-    """Work an oversized RITC position back toward flat, passively first.
+    """Work TENDER inventory back toward flat, passively first.
 
     A tender leaves ~91k units of ETF on the book, which is 182k of the 300k
-    gross limit. Hedging it with the basket would add another 182k and breach
-    that cap, and the converters that would collapse it are human-only per the
-    case rules, so the position has to be sold back into the market instead.
+    gross limit. A full basket hedge would add another 182k and breach that
+    cap - only the small `prehedge_for_tender` slice fits - and the converters
+    that would collapse the position are human-only per the case rules. So it
+    is sold back into the market, or held (below).
 
-    Two layers:
+    It targets `tender_position`, never the raw RITC position: the arb's ETF
+    leg is a hedge against its own BULL/BEAR, and selling it off turns a
+    net-neutral arb into a naked short basket (v11).
+
+    Three exits, cheapest first:
+
+    HOLD, past HOLD_TO_CLOSEOUT_TICK. Close-out is free against the mid and a
+    tender that late blocks almost nothing, so nothing is traded at all (v14).
 
     PASSIVE rests one order at the touch. It earns the 0.01/share rebate
     instead of paying the 0.02 fee, sells at bid+0.01 instead of at the bid,
     and - the part v10 showed matters most - takes no liquidity at all, so it
     cannot drag the quote the way 92,000 units of market orders did.
 
-    AGGRESSIVE is the v10 market chunker, unchanged, but it now only fires when
-    the position is behind the glide path. That keeps the deadline guarantee
-    that stops a slow unwind from blocking the next tender, while paying the
-    spread only on the units the passive layer could not clear in time.
+    AGGRESSIVE is v11's market chunker, unchanged, but it only fires when the
+    position is behind the glide path. That keeps the deadline that stops a
+    slow unwind blocking the next tender, while paying the spread only on the
+    units the passive layer could not clear in time.
 
     Worst case - nothing ever fills passively - every unit goes through the
-    aggressive layer and the behaviour degrades exactly to v10.
+    aggressive layer and the behaviour degrades exactly to v11.
     """
     global tender_position
     # Passive fills are booked before anything is decided, so `tender_position`
