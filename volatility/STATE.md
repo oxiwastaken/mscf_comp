@@ -1,7 +1,98 @@
 # STATE — Volatility Trading Case
 
 Work tracker for the RITCx Volatility Trading Case build.
-**Competition: Saturday 19 September 2026, Carnegie Mellon.** Last updated 17 Sep 2026.
+**Competition: Saturday 19 September 2026, Carnegie Mellon.** Last updated 19 Sep 2026.
+
+---
+
+## READ THIS FIRST — 19 Sep, 03:00. The backtest could not see the fine.
+
+**The penalty was charged AFTER hedging, on the delta the hedge had just
+flattened.** It modelled **$834 a heat** against the **$14,080 the server
+actually charged** on the same 25 heats — a factor of 17. Fixed in
+`backtest.py`: it is now charged at the top of the tick on the book carried in
+from the last one, which is what the server samples. Validated against the
+recordings' own `total_fines`: **$11,761 modelled against $14,927 charged,
+ratio 0.79x, correlation 0.53**, up from 0.06x.
+
+**Everything below that trades P&L against the fine was ranked by a model
+blind to one side of the trade.** Two specific claims in this document are
+now known to be WRONG:
+
+| claim in this doc | what it actually is |
+|---|---|
+| wider hedge band 6,900/6,500 is **+$4,307 (t 3.3)**, "not yet applied" | **−$3,516 (t −3.6).** Saves $2,643 of friction, pays $7,295 more fine. **Do not ship it.** The shipped 5,000/2,000 trigger is the optimum of a 16-point grid |
+| `NO_NEW_AFTER` 0.85 is **−$1,437**, nothing there | 0.87 is **+$1,421 (t 2.2)** and cuts the fine by a fifth. **Shipped** |
+| "every way of shrinking the position to avoid the fine costs more than it saves" | that was the blind model talking. It could see vega given up and almost none of the gamma cost avoided |
+
+Two more tooling defects found with it, both of which made parameters look
+settled when they had never been measured:
+
+- **The backtest never passed `wing_contracts`**, so `wing_allowance` never ran
+  and `STRUCTURE_OFF_AFTER` scored *identically at 0.70, 0.80 and 0.90 — to the
+  dollar*. It carried 750 contracts of wing into the last ticks of every heat.
+- **`sweep.apply` resolved any unknown module prefix to `autotrader`**, so every
+  `structure.WING_*` sweep set an attribute nothing reads and reported the
+  reference score as the candidate's. Unknown prefixes now raise.
+
+### The competition-day bug, found the same night
+
+`_gap_ema` was seeded on the first reading **of the process, not of the heat**.
+A trader left running across a heat boundary opened the new heat on the *old*
+one's smoothed vol gap — at tick 1, at full size, in whatever direction that
+said, before the new heat's news had been read. At `GAP_SMOOTHING = 0.10` it
+takes ~22 ticks to forget.
+
+`overnight.py` hid it completely by spawning a fresh trader per heat, so the
+entire recorded library is clean and no backtest could ever have shown it.
+**The competition is exactly where it bites** — the pre-flight checklist says to
+start the trader once and let it wait for ACTIVE, and there are ten heats back
+to back. Fixed: `reset_heat_state()` fires on a non-ACTIVE case and on the tick
+counter running backwards.
+
+### Where the money actually goes, per heat (25 heats, measured)
+
+```
+gross volatility P&L          $208,843
+  fees + crossed spread       -$48,476   23.2%   (options $39.5k, RTM $9.0k)
+  the SERVER's fine           -$16,192    7.8%
+  = NLV                       $144,175
+```
+
+Friction attributed to the decision that caused it: **strike switching
+$17,321**, news resizes $12,001, exits $7,962, everything else $9,759.
+Switching is the largest single line — and widening it is **−$5,896
+order-accurate**, so it pays for itself. Left at 1.5.
+
+### Re-swept with the fine priced: every axis is at its optimum
+
+Thirteen axes re-run over 208 recordings. **Exactly one beat the shipped
+config** — `HEDGE_TARGET_DELTA` 2,000 → 3,000, +$1,342 (t 2.8), now shipped.
+`market` beats `fixed` by $25,757 and `persist` by $4,613; `MAX_IV_SPREAD`,
+`GAP_SMOOTHING`, `EXIT_VOL_EDGE`, `STRUCTURE_OFF_AFTER`, `WING_CONTRACTS` and
+the rest are all confirmed where they were. **The parameter space is
+exhausted.**
+
+### Measured and deliberately NOT shipped
+
+- **`WING_NET_BUFFER`.** The backtest likes 0 (+$5,902, t 11.9) and the
+  order-accurate replay produces an **illegal book** on it. The surface is a
+  sawtooth — 0: +5,902, 25: −9,576, 50: 0, 75: −12,484 — so it is resolving the
+  backtest's own atomic sequencing, not economics. **Left at 50.**
+- **Reversal hysteresis** (require more conviction to flip a position than to
+  open one). Economically sound — a reversal costs twice an open — but +$383 at
+  t 1.1, and it saturates by 0.010, meaning it almost never binds. The sign
+  changes are genuine high-conviction reversals, not noise. **Reverted, not
+  shipped.** Do not re-add a parameter that does nothing.
+
+### Standing
+
+Live **$138,911** over the 34 heats since 23:05, backtest $154,114 on the same
+heats, **ratio 1.11x, correlation 0.95, zero losing heats**. Tonight's two
+shipped changes are worth ~+$2,500 live. The honest read is **~$141k per
+trader**, against a $150k target — and the remaining route to the team number
+is still the one this document has said all along: **both members run the bot,
+team P&L is the sum.**
 
 ---
 
