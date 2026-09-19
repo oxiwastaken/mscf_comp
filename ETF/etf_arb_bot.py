@@ -345,23 +345,36 @@ PASSIVE_REPRICE_TICKS = 1
 # figure is 6,375 USD.
 #
 # The only thing the unwind buys is capacity for the NEXT tender, so the
-# question is how many more are still coming. Counted over 234 logged tenders,
-# the average number of LATER tenders in the same heat clearing the 0.08 bar:
+# question is how many more are coming - and specifically how many that a held
+# position would actually block. Only LATER, SAME-DIRECTION tenders are
+# blocked: an opposite-direction tender reduces net rather than adding to it,
+# and is in fact the ideal outcome, since it flattens the held position and
+# pays us for the privilege. 43% of consecutive tenders are opposite, which
+# roughly halves the cost of holding. Over 234 logged tenders:
 #
-#     arrives    0-29   30-59  60-89  90-119 120-149 150-179 180-209 210-239
-#     later      3.50    3.11   2.62    1.89    1.70    0.96    0.48    0.03
+#     arrives      0-29  30-59  60-89  90-119 120-149 150-179 180-209 210-239
+#     all later    3.50   3.11   2.62    1.89    1.70    0.96    0.48    0.03
+#     same-dir     2.04   1.75   1.62    1.04    0.91    0.46    0.34    0.00
 #
-# After tick 210 a tender blocks essentially nothing. 200 is set one bucket
-# earlier, where 0.48 expected follow-ons at ~3,000 USD of realised value still
-# sit well under the 6,375 USD the unwind costs - roughly 2x in favour of
-# holding, rather than the 17x at 210, so the threshold does not depend on the
-# tail of that distribution being exactly right.
+# `sweep_holdtick.py` turns that into expected value per heat. The central
+# estimate peaks at 150 (+6,629) with 175 (+6,300) and 200 (+5,666) behind it -
+# a flat curve, so the choice is decided by robustness rather than by the peak.
 #
-# Drift over the extra ticks is mean-zero (measured -0.0126/unit against a
-# 0.0779 sd), so holding trades a certain cost for an uncertain one with no
-# expected price. With the heat mean well short of the 40,000 target, that is
-# the right side of the trade to be on.
-HOLD_TO_CLOSEOUT_TICK = 200
+# The cost side depends on what a captured tender is worth, which is a median
+# over 32 noisy observations. Sweeping that from 4,000 to 20,000 USD moves the
+# argmax from 90 all the way to 225, so the point estimate cannot be trusted on
+# its own. Worst-case regret across that whole range:
+#
+#     threshold    0      60      90     120    150    175    200    225
+#     regret    92,125  45,441  25,139  14,640  3,706  3,732  5,278  8,092
+#
+# 150 and 175 are tied (26 USD/heat apart) and both clearly beat 200. The
+# tiebreak is the one thing the sweep deliberately does not price: drift.
+# Holding is mean-zero (-0.0126/unit against a 0.0779 sd) so it cannot move the
+# argmax, but it does widen heat P&L, and 175 holds 1.79 tenders/heat for up to
+# 125 ticks against 150's 2.28 for up to 150. Same expected value, less
+# variance - so 175.
+HOLD_TO_CLOSEOUT_TICK = 175
 
 # --- tender pre-hedge ----------------------------------------------------
 # The largest tenders do not fit the net limit even on a completely flat book.
@@ -415,8 +428,10 @@ ARB_THRESHOLD_CAD = 0.07
 #   v16_trackersync - an accept updates the cycle's position read, and the
 #             tender tracker is reconciled to the live position so it cannot
 #             ratchet into reaching for the arb's hedge leg.
-RISK_MODEL = "v16_trackersync"
-RISK_MODEL_DESC = "v15 plus: accept folds into pos, and the tender tracker cannot ratchet"
+#   v17_holdtick - hold threshold moved 200 -> 175, chosen by worst-case
+#             regret once only same-direction tenders are counted as blocked.
+RISK_MODEL = "v17_holdtick"
+RISK_MODEL_DESC = "v16 plus: hold threshold 175, picked for robustness not the peak"
 
 LOOP_SLEEP = 0.5    # between cycles inside a heat (~8 requests per cycle)
 WAIT_POLL = 2.0     # between polls while waiting for the next heat

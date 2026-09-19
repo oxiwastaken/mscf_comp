@@ -594,6 +594,53 @@ as a contradiction in the output. The first tender in the scenario is now
 deliberately 100,000 units on a flat book — 200,000 of net against a 197,000
 cap — because without it nothing exercised the pre-hedge end to end.
 
+## `v17_holdtick` — the hold threshold, chosen for robustness not for the peak
+
+v14 set `HOLD_TO_CLOSEOUT_TICK = 200` by reading a table. Two things were wrong
+with that.
+
+**Holding does not block every later tender — only same-direction ones.** An
+opposite-direction tender *reduces* net rather than adding to it, so it still
+fits. It is in fact the ideal outcome: it flattens the held position and pays
+us for the privilege. **43% of consecutive tenders are opposite**, which
+roughly halves the cost of holding:
+
+| arrives   | 0–29 | 30–59 | 60–89 | 90–119 | 120–149 | 150–179 | 180–209 | 210–239 |
+|-----------|------|-------|-------|--------|---------|---------|---------|---------|
+| all later | 3.50 | 3.11  | 2.62  | 1.89   | 1.70    | 0.96    | 0.48    | 0.03    |
+| same-dir  | 2.04 | 1.75  | 1.62  | 1.04   | 0.91    | 0.46    | 0.34    | 0.00    |
+
+**And the peak of the curve is not where to sit.** `sweep_holdtick.py` puts the
+central estimate at 150 (+6,629/heat), with 175 (+6,300) and 200 (+5,666)
+behind it — flat enough that the peak is not meaningful on its own. The cost
+side depends on what a captured tender is worth, which is a median over 32
+noisy observations. Sweeping that from 4,000 to 20,000 USD moves the argmax
+from **90 all the way to 225**.
+
+So the threshold is chosen by worst-case regret across that whole range:
+
+| threshold | 0      | 60     | 90     | 120    | 150   | 175   | 200   | 225   |
+|-----------|--------|--------|--------|--------|-------|-------|-------|-------|
+| regret    | 92,125 | 45,441 | 25,139 | 14,640 | 3,706 | 3,732 | 5,278 | 8,092 |
+
+150 and 175 are tied — 26 USD/heat apart — and both clearly beat the 200 that
+v14 picked. The tiebreak is the one thing the sweep deliberately does not
+price: **drift**. It is mean-zero (−0.0126/unit against a 0.0779 sd) so it
+cannot move the argmax, but it does widen heat P&L, and 175 holds 1.79
+tenders/heat for up to 125 ticks against 150's 2.28 for up to 150. Same
+expected value, less variance — so **175**.
+
+Worth roughly +630/heat over v14's 200 at the central estimate, and rather more
+than that in confidence: the old figure sat on one reading of one table.
+
+### Tooling
+
+`sweep_holdtick.py` scores both sides of the trade per tender over the same
+logged history, so the comparison is like-for-like, then sweeps the one input
+it cannot pin down and reports minimax regret rather than only the argmax.
+Drift is excluded by design and the reason is stated in the output, so nobody
+later mistakes its absence for an oversight.
+
 ---
 
 ## Known open items
