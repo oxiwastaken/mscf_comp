@@ -86,6 +86,13 @@ shutdown = False
 # while BULL/BEAR ran to -20,000 each and NLV fell ~9,000 in ten ticks.
 tender_position = 0
 
+# Basket put on purely to make net room for an oversized tender, signed, units
+# per side (BULL and BEAR carry the same amount). Tracked separately from the
+# arb's own BULL/BEAR for the same reason `tender_position` is tracked
+# separately from raw RITC: flattening it by reading the aggregate position
+# would eat the arb's legs, which is the v11 bug one instrument over.
+prehedge_position = 0
+
 
 class ApiException(Exception):
     pass
@@ -300,6 +307,25 @@ PASSIVE_CHUNK = 10000
 # tick of it.
 PASSIVE_REPRICE_TICKS = 1
 
+# --- tender pre-hedge ----------------------------------------------------
+# The largest tenders do not fit the net limit even on a completely flat book.
+# At the ETF's x2 multiplier a 99,000 unit tender is 198,000 of net against a
+# 200,000 cap, and 100,000 is exactly 200,000 - so the buffer alone refuses
+# them. They are not rare: 6% of 234 logged tenders are 98,500 or larger, and
+# the ones clearing the edge bar are worth ~4,200 USD/heat.
+#
+# One BULL plus one BEAR carries the same exposure as one RITC but at a x1
+# multiplier each, so selling `need/2` of both moves net by `need` in the
+# opposite direction and buys exactly that much room. It costs 2 x need/2
+# shares of fee - 60 USD to reach a 22,000 USD tender in the worst logged case
+# - and it is a genuine hedge rather than a limits trick: short basket against
+# long ETF lowers the directional exposure carried through the unwind.
+PREHEDGE = True
+# Cap per side. Sized to cover the whole observed shortfall (max 3,000 of net,
+# so 1,500 a side) with room to spare, while staying small enough that a hedge
+# left on by a failed accept is a rounding error rather than a position.
+MAX_PREHEDGE = 5000
+
 # Retained only as the pre-calibration fallback; live bars come from
 # calibration.calibrate() and are logged per heat.
 ARB_THRESHOLD_CAD = 0.07
@@ -322,8 +348,10 @@ ARB_THRESHOLD_CAD = 0.07
 #   v12_passiveunwind - v11 plus a passive layer: the unwind rests limit orders
 #             at the touch for the 0.01 rebate and only crosses when it is
 #             behind the glide path to flat.
-RISK_MODEL = "v12_passiveunwind"
-RISK_MODEL_DESC = "v11 hedge-safe target, unwound passive-first and crossing only when behind"
+#   v13_prehedge - a small basket is put on to buy net room for tenders too
+#             large to fit the x2 net cap even on a flat book.
+RISK_MODEL = "v13_prehedge"
+RISK_MODEL_DESC = "v12 plus a basket pre-hedge that reaches oversized tenders"
 
 LOOP_SLEEP = 0.5    # between cycles inside a heat (~8 requests per cycle)
 WAIT_POLL = 2.0     # between polls while waiting for the next heat
@@ -366,7 +394,8 @@ TENDER_FIELDS = [
     "quantity", "price", "is_fixed_bid", "expires",
     "caption", "mkt_bid", "mkt_ask", "chunk_vwap", "depth_visible",
     "usd_bid", "usd_ask",
-    "edge_vs_mkt", "safe_ok", "safe_reason", "accepted", "accept_ok", "accept_err",
+    "edge_vs_mkt", "safe_ok", "safe_reason", "prehedge",
+    "accepted", "accept_ok", "accept_err",
 ]
 
 HEAT_FIELDS = [
@@ -965,6 +994,117 @@ def tender_safety(offer, pos, book, usd_bid, usd_ask):
     return True, "ok", edge
 
 
+def net_shortfall(offer, pos):
+    """Net room, in exposure units, that this tender is short of. 0 if it fits."""
+    qty = float(offer.get("quantity") or 0)
+    action = (offer.get("action") or "").upper()
+    signed = -qty if action == "SELL" else qty
+    proj_net = pos[BULL] + pos[BEAR] + 2 * (pos[RITC] + signed)
+    return max(abs(proj_net) - (SERVER_NET_LIMIT - LIMIT_BUFFER), 0.0)
+
+
+def prehedge_for_tender(session, offer, pos, logs, heat, tick, snap):
+    """Put on a small basket so an oversized tender fits inside the net limit.
+
+    A BUY tender pushes net up, so the hedge sells BULL and BEAR; a SELL tender
+    does the reverse. `need / 2` of each side buys `need` of room, because the
+    two stocks together carry one ETF's exposure at half its multiplier.
+
+    Returns units hedged per side, and updates `pos` in place so the caller's
+    re-check sees the new book rather than the stale one.
+    """
+    global prehedge_position
+    need = net_shortfall(offer, pos)
+    if need <= 0:
+        return 0
+    per_side = int(-(-need // 2))          # ceil, so we clear the bar not tie it
+    if per_side > MAX_PREHEDGE:
+        return 0
+    # Several tenders can be live in the same cycle and each would size its
+    # hedge against the same book. Cap the running total, not just the single
+    # order, so they cannot stack into a position of their own.
+    if abs(prehedge_position + (per_side if need else 0)) > MAX_PREHEDGE:
+        print(f"    prehedge skipped: {abs(prehedge_position):,} already on")
+        return 0
+
+    # The hedge itself consumes gross. Check the whole projected book, not just
+    # the hedge, or we trade room on one limit for a breach of the other.
+    qty = float(offer.get("quantity") or 0)
+    signed = -qty if (offer.get("action") or "").upper() == "SELL" else qty
+    action = "SELL" if signed > 0 else "BUY"
+    step = -per_side if action == "SELL" else per_side
+    proj_gross = (abs(pos[BULL] + step) + abs(pos[BEAR] + step)
+                  + 2 * abs(pos[RITC] + signed))
+    if proj_gross > SERVER_GROSS_LIMIT - LIMIT_BUFFER:
+        print(f"    prehedge skipped: gross would hit {proj_gross:,.0f}")
+        return 0
+
+    for ticker in (BULL, BEAR):
+        try:
+            resp = place_mkt(session, ticker, action, per_side)
+        except ApiException as e:
+            print(f"    prehedge {ticker} failed: {e}")
+            return 0
+        row = {
+            "run_id": RUN_ID, "risk_model": RISK_MODEL, "heat": heat,
+            "tick": tick, "ts": now_iso(), "direction": "prehedge",
+            "edge_at_decision": "", "leg": 0, "ticker": ticker,
+            "action": action, "qty": per_side, "ok": resp is not None,
+            "exec_style": "aggressive", "limit_price": "",
+        }
+        if resp:
+            row.update({"order_id": resp.get("order_id"),
+                        "quantity_filled": resp.get("quantity_filled"),
+                        "vwap": resp.get("vwap"),
+                        "order_status": resp.get("status")})
+        row.update(snap)
+        logs.trades.write(row)
+        pos[ticker] = pos.get(ticker, 0) + step
+
+    prehedge_position += step
+    print(f"    PREHEDGE {action} {per_side:,} BULL + BEAR "
+          f"(buys {per_side * 2:,} of net room, fee ~{per_side * 2 * FEE_MKT:,.0f})")
+    return per_side
+
+
+def unwind_prehedge(session, pos, logs, heat, tick, snap):
+    """Take the pre-hedge off once the tender it was carrying is gone.
+
+    Held for the whole life of the tender position rather than unwound
+    alongside it: short basket against long ETF is what makes the exposure
+    smaller while the risky leg is still on the book. It only becomes a naked
+    directional position once the ETF has cleared, which is when this runs.
+    """
+    global prehedge_position
+    if not prehedge_position or abs(tender_position) > UNWIND_THRESHOLD:
+        return 0
+    action = "SELL" if prehedge_position > 0 else "BUY"
+    qty = min(abs(prehedge_position), MAX_SIZE_EQUITY)
+    for ticker in (BULL, BEAR):
+        try:
+            resp = place_mkt(session, ticker, action, qty)
+        except ApiException as e:
+            print(f"  prehedge unwind {ticker} failed: {e}")
+            return 0
+        row = {
+            "run_id": RUN_ID, "risk_model": RISK_MODEL, "heat": heat,
+            "tick": tick, "ts": now_iso(), "direction": "prehedge_unwind",
+            "edge_at_decision": "", "leg": 0, "ticker": ticker,
+            "action": action, "qty": qty, "ok": resp is not None,
+            "exec_style": "aggressive", "limit_price": "",
+        }
+        if resp:
+            row.update({"order_id": resp.get("order_id"),
+                        "quantity_filled": resp.get("quantity_filled"),
+                        "vwap": resp.get("vwap"),
+                        "order_status": resp.get("status")})
+        row.update(snap)
+        logs.trades.write(row)
+    prehedge_position -= qty if action == "SELL" else -qty
+    print(f"  PREHEDGE UNWIND {action} {qty:,} BULL + BEAR")
+    return qty
+
+
 def handle_tenders(session, logs, heat, tick, snap, quotes, pos, books):
     """Log every active tender, then decide whether to accept it.
 
@@ -991,6 +1131,17 @@ def handle_tenders(session, logs, heat, tick, snap, quotes, pos, books):
         book = books.get(ticker, {"bids": [], "asks": []})
         safe, reason, edge = tender_safety(
             offer, pos, book, snap["usd_bid"], snap["usd_ask"])
+        # Only the net check is worth buying our way past. A gross breach means
+        # the book is genuinely full; a net breach on a tender this size is
+        # usually just the x2 multiplier, and a few thousand shares of basket
+        # fixes it. The edge gate is never overridden.
+        hedged = 0
+        if PREHEDGE and not safe and reason.startswith("net would hit"):
+            hedged = prehedge_for_tender(session, offer, pos, logs, heat, tick, snap)
+            if hedged:
+                safe, reason, edge = tender_safety(
+                    offer, pos, book, snap["usd_bid"], snap["usd_ask"])
+                reason = f"{reason} after prehedge {hedged:,}"
         side = "asks" if (offer.get('action') or '').upper() == "SELL" else "bids"
         chunk_ref, _ = vwap_for_qty(book.get(side) or [], UNWIND_CHUNK)
         visible = sum(float(r.get("quantity", 0) or 0) for r in (book.get(side) or []))
@@ -1006,7 +1157,7 @@ def handle_tenders(session, logs, heat, tick, snap, quotes, pos, books):
             "depth_visible": round(visible),
             "usd_bid": snap["usd_bid"], "usd_ask": snap["usd_ask"],
             "edge_vs_mkt": round(edge, 6) if edge is not None else "",
-            "safe_ok": safe, "safe_reason": reason,
+            "safe_ok": safe, "safe_reason": reason, "prehedge": hedged,
         }
         # Written BEFORE any accept attempt - see docstring.
         logs.tenders.write(row)
@@ -1127,6 +1278,9 @@ def step_once(session, logs, heat, tick, bases, cycle, st):
 
     unwind_action, unwind_qty = unwind_ritc(
         session, pos, books[RITC], snap, logs, heat, tick, cycle, st)
+    # After the ETF leg, so the basket comes off only once the position it was
+    # hedging is actually gone.
+    unwind_prehedge(session, pos, logs, heat, tick, snap)
     fx_action, fx_qty = hedge_fx(session, pos)
 
     traded = False
@@ -1238,8 +1392,9 @@ def run_heat(session, logs, heat, margins, prev_bases):
     nlv_end = nlv_start
     st = UnwindState()
 
-    global tender_position
+    global tender_position, prehedge_position
     tender_position = 0   # positions are closed out at heat end
+    prehedge_position = 0
     print(f"=== heat {heat} starting (NLV {nlv_start}) ===")
     bases, margins = calibrate_for_heat(logs, heat, margins, prev_bases)
 

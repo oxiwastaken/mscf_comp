@@ -341,6 +341,83 @@ of one-chunk unwinding** — on six tenders it looks like a small sample.
   price level. Same failure mode as the v8/v9 metric, caught before it decided
   anything.
 
+## `v13_prehedge` — buy net room for the tenders that cannot fit
+
+**The diagnosis first, because it reframes three versions of work.** Every
+tender the net check has ever refused was pulled out of the logs and paired
+with the position at that tick:
+
+    ver              heat tick      qty     edge    bull    bear    ritc      net
+    netbar_fxhedge      8  180   99,000  +0.2800  15,000  15,000  -2,000   26,000
+    v7_edgecal          2  203   97,000  +0.1400  35,000  35,000  -2,000   66,000
+    v7_edgecal          3  167   87,000  +0.1700  20,000  20,000  -2,000   36,000
+    v10_revert          4  199   97,000  +0.0800 -20,000 -20,000   2,000  -36,000
+
+`ritc` is ±2,000 — the unwind residual — in **every single one**. The net that
+was blocking tenders was never tender inventory waiting to be unwound. It was
+the arb's own BULL/BEAR. 29 blocked tenders, **350,740 USD of positive edge**,
+and v8/v9/v10 spent three versions tuning unwind speed to fix it.
+
+That splits cleanly:
+
+- **257,320 USD across 24 tenders** would fit on a book where the arb is
+  net-neutral. That is exactly what v11 restored by stopping the unwind eating
+  the arb's ETF hedge leg — so v11 is worth far more than the ~9,000 NLV it was
+  written to recover.
+- **93,420 USD across 5 tenders** does not fit *even on a completely flat book*.
+  That is this version.
+
+**The structural problem.** At the ETF's x2 multiplier a 99,000 unit tender is
+198,000 of net against a 200,000 cap, and 100,000 is exactly 200,000. With
+`LIMIT_BUFFER` on top, the largest tenders are unreachable no matter how well
+everything else behaves. They are not rare — 6% of 234 logged tenders are
+98,500 or larger — and the ones clearing the edge bar are worth ~4,200 USD/heat.
+
+**The fix.** One BULL plus one BEAR carries the same exposure as one RITC, but
+at a x1 multiplier each. Selling `need/2` of both moves net by `need` in the
+opposite direction, so a few thousand shares buys room for a tender that is
+tens of thousands of units too large. Replayed against the four reachable
+cases on a v11-clean book:
+
+| heat | qty     | edge    | value       | hedge/side | fee  |
+|------|---------|---------|-------------|------------|------|
+| 3    | 99,000  | +0.1600 | +15,840 USD | 2,500      | 100  |
+| 4    | 100,000 | +0.2200 | +22,000 USD | 3,500      | 140  |
+| 7    | 97,000  | +0.1600 | +15,520 USD | 500        | 20   |
+| 2    | 98,000  | +0.0950 |  +9,310 USD | 1,500      | 60   |
+
+20 to 140 USD of fee to reach 9,310 to 22,000 USD of edge.
+
+It is also a real hedge, not a limits trick: short basket against long ETF is
+less directional exposure carried through the unwind, not more. So the
+pre-hedge is held for the whole life of the tender position and taken off only
+once the ETF leg has cleared — `unwind_prehedge` runs after `unwind_ritc` for
+that reason.
+
+**Guards.** Only the *net* check is bought past; a gross breach means the book
+is genuinely full, and the edge gate is never overridden. The hedge is sized
+against projected gross as well as net, so net room is never bought with a
+gross breach. `prehedge_position` is tracked separately from the arb's
+BULL/BEAR — flattening it by reading the aggregate position would eat the arb's
+legs, which is the v11 bug one instrument over. The running total is capped at
+`MAX_PREHEDGE`, not just the single order, because several tenders can be live
+in one cycle and would each size against the same book. If an accept fails
+afterwards, the hedge is flat again on the next cycle.
+
+### Tooling
+
+`test_prehedge.py` replays the real refusals rather than a synthetic scenario,
+in two regimes. AS LOGGED, the arb's basket is still in the book and the
+shortfalls are far larger than a hedge should cover — reported, not asserted.
+V11-CLEAN puts the same tenders against a book carrying only the unwind
+residual, which is the world v11 creates and the one this is designed for, and
+asserts all four are reached, cheaply, without breaching gross, and flattened
+afterwards.
+
+One row was excluded: a netbar-era rejection of a legal 182,000 that today's
+absolute `LIMIT_BUFFER` already allows. The test reports the exclusion rather
+than quietly dropping it.
+
 ---
 
 ## Known open items
