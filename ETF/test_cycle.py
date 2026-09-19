@@ -24,6 +24,13 @@ must hold regardless of parameters:
 import sys
 
 import etf_arb_bot as bot
+
+# This suite exercises the unwind and late-hold machinery, which stays in the
+# bot but is dormant in production since v27 holds every tender from tick 0.
+# Pin the threshold these checks were written against, so they keep testing
+# that logic rather than the production setting.
+bot.HOLD_TO_CLOSEOUT_TICK = 200
+bot.MIN_TENDER_EDGE_HELD = 0.04   # the held bar these checks were written against
 import sim_unwind as sim
 
 

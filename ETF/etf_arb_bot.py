@@ -284,7 +284,10 @@ MIN_TENDER_EDGE = 0.04
 # Worth 11 tenders and ~3,017 USD/heat across the logged history: tenders like
 # +0.0086 on 93,000 units that the unwind-priced bar refused, which are
 # +0.0836 once the exit is close-out.
-MIN_TENDER_EDGE_HELD = 0.04
+# 0.08 since v27: with every tender held, this is the only bar that applies.
+# The replay plateau is 0.06-0.10 (0.12 falls off); 0.08 is its middle, chosen
+# for robustness rather than the peak, as v17's hold threshold was.
+MIN_TENDER_EDGE_HELD = 0.08
 # Guards the threshold comparison against float noise. Without it an edge of
 # 0.09999999 printed as "+0.1000 < 0.1" and declined an 84,000-unit tender
 # worth ~8,400 USD over a rounding artefact.
@@ -453,7 +456,19 @@ PASSIVE_REPRICE_TICKS = 1
 # raises the passive share further, the unwind gets cheaper again and this
 # should move later still - re-run sweep_holdtick.py after the next heat that
 # actually unwinds.
-HOLD_TO_CLOSEOUT_TICK = 200
+# 0 since v27: hold EVERY tender to close-out, never unwind.
+#
+# 60 live v26 heats showed a systematic gap of -35,071/heat between the edge of
+# accepted tenders and realised P&L (t ~ -5). Calibrating the replay harness on
+# those heats puts the true unwind cost at ~0.084/unit against the mid - over
+# 3x the 0.0249 the gate and the replay had assumed, from v14. Tenders we unwind
+# see the price move -0.057/unit against us within 10 ticks (our own exit
+# pushing it); tenders we hold see -0.023, not significant. Close-out is free
+# and exact. At that unwind cost, holding everything beat the live policy by
+# +36,325/heat over 104 heats (t +5.73), both halves positive, still +21,839 at
+# an unwind cost as low as 0.05, and with a better median, p10, p25 and fewer
+# losing heats (22 vs 31 of 104). Capacity for later tenders comes from the swap.
+HOLD_TO_CLOSEOUT_TICK = 0
 
 # --- tender pre-hedge ----------------------------------------------------
 # The largest tenders do not fit the net limit even on a completely flat book.
@@ -564,8 +579,8 @@ ARB_THRESHOLD_CAD = 0.07
 #   v21_grossreserve - the arb may only use gross that no tender needs. It was
 #             net-neutral and invisible to every net check while holding 224,000
 #             of gross and refusing 40,119 USD of tenders in one heat.
-RISK_MODEL = "v26_mmoff"
-RISK_MODEL_DESC = "v24 behaviour: market making switched off after its live test"
+RISK_MODEL = "v27_holdall"
+RISK_MODEL_DESC = "hold every tender to close-out (unwind costs 3x what was assumed); bar 0.08 vs mid"
 
 LOOP_SLEEP = 0.5    # between cycles inside a heat (~8 requests per cycle)
 WAIT_POLL = 2.0     # between polls while waiting for the next heat

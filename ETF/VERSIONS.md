@@ -1197,7 +1197,53 @@ mostly held-inventory drift.
 inside it, so fills come only on larger moves and pay a wider spread each -
 fewer fills, less adverse selection. It needs its own live test.
 
+## `v27_holdall` - hold every tender to close-out
+
+**60 live v26 heats found a systematic leak.** Against the edge of the tenders
+it accepted, v26 realised -35,071/heat less (t ~ -5), in every third of the
+night. v26 overall: mean +13,858, median +22,623, sd 52,137.
+
+- The swap is not it: its dumps cost 0.168/unit, close to the 0.15 assumed,
+  ~2,400/heat in all; heats with no swap still lost -31,767 against expected.
+- Nor is it the market changing overnight: the price moves against us after
+  acceptance in every version since v14 (-0.048/unit at +10 ticks on v26,
+  -0.066 on v21). v21's +61 gap was a fortunate 10-heat sample.
+- It is the unwind. Tenders we unwind move -0.057/unit against us within 10
+  ticks - largely our own exit pushing the price; tenders we hold move -0.023,
+  not significant. Calibrated on the 60 live heats, the replay matches live at
+  an unwind cost of **~0.084/unit** against the mid - over 3x the 0.0249 the
+  gate and the replay had assumed since v14.
+
+**At the true cost, holding beats unwinding.** Close-out is free and exact.
+Replayed over 104 heats with the swap on, paired against v26:
+
+| policy | mean | median | p10 | p25 | losing | vs live |
+|---|---|---|---|---|---|---|
+| v26 (hold from 200, bar 0.04) | +25,795 | +30,844 | -40,699 | -8,441 | 31/104 | - |
+| hold all, bar 0.08 | +62,119 | +64,876 | -22,499 | +11,987 | 22/104 | +36,325 (t +5.73) |
+
+Positive in both halves at every unwind cost tried, still +21,839 (t +3.39) at
+0.05. Better on every measure the per-heat ranking cares about. The held bar
+plateaus at 0.06-0.10 and falls at 0.12; 0.08 is its middle, chosen for
+robustness rather than the 0.10 peak.
+
+`HOLD_TO_CLOSEOUT_TICK = 0`, `MIN_TENDER_EDGE_HELD = 0.08`. Capacity for later
+tenders comes from the swap. The unwind code stays, dormant.
+
+`test_holdall.py` asserts the production path: the unwind sends no order at any
+tick, and every tender is priced on the close-out basis. The three suites that
+exercise the unwind and late-hold logic now pin the constants they were written
+against. `test_hold_gate`'s uplift check asserted v15's exact +0.0626 from 385
+books; on today's 3,169 it is +0.0715, so it now checks what v15 rests on - that
+the uplift is materially positive - rather than a figure that moves with the data.
+
 ## Known open items
+
+- **Latent tracker mismatch under swap-heavy sequences.** With the unwind path
+  enabled and a 0.08 held bar, test_cycle's synthetic heat (five same-direction
+  tenders back to back, each needing a swap dump) ends with the tracker at
+  2,000 against a real 22,000. Dormant in v27, where nothing is unwound; the
+  tracker then only sizes swap dumps, so the worst case is an under-sized swap.
 
 - ~~`basket_rich` is negative (−0.0218/unit over 8 arbs)~~ — **RETRACTED.**
   Rebuilt over the full history with `calibration.load_arbs`, `basket_rich` is
