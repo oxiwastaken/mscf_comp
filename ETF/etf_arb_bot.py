@@ -178,7 +178,6 @@ MAX_SIZE_FX = 2500000
 
 MAX_LONG_NET = 25000
 MAX_SHORT_NET = -25000
-MAX_GROSS = 250000   # server gross_limit is 300000 (0.5/unit fine above it)
 ORDER_QTY = 5000
 
 # Residual USD below this is left alone, to avoid churning on rounding.
@@ -191,6 +190,34 @@ SERVER_NET_LIMIT = 200000
 # RITC = 180k-198k exposure at the x2 multiplier, i.e. deliberately just inside
 # the 200k net cap. A 10% safety factor rejected a legal 182,000 outright.
 LIMIT_BUFFER = 3000
+
+# Gross set aside for tenders, which the spread arb may not touch.
+#
+# v11 stopped the arb blocking tenders on NET. It then started blocking them on
+# GROSS instead, and that went unnoticed until v14 ran live. A v14 heat held
+# bull +55,000 / bear +55,000 / ritc -57,000 - net -4,000, so perfectly
+# net-neutral and invisible to every net check - but 224,000 of gross, 75% of
+# the cap. Two tenders were refused on "gross would hit": +0.2500 on 87,000
+# units and +0.1997 on 92,000. 40,119 USD in one heat.
+#
+# The arithmetic is lopsided enough that it is not a close call. Measured over
+# 438 logged arbs:
+#
+#     arb-gross cap   arbs blocked   cost at 120 CAD/arb
+#          200,000          3%              ~24 CAD/heat
+#          127,000          7%              ~55 CAD/heat
+#           97,000         10%              ~78 CAD/heat
+#
+# against 14,277 USD/heat of tenders that v14 refused on gross. Reserving for
+# the LARGEST tender ever seen (100,000 units = 200,000 gross) costs ~78 CAD a
+# heat and guarantees the arb can never be the reason a tender is refused.
+# The arb is worth 783 CAD/heat in total; a single blocked tender is worth
+# ~10,000 USD.
+TENDER_GROSS_RESERVE = 200000
+# What the arb is allowed to consume. Derived, not a magic number, so that
+# changing the reserve or the buffer cannot leave a stale constant behind.
+MAX_GROSS = SERVER_GROSS_LIMIT - LIMIT_BUFFER - TENDER_GROSS_RESERVE   # 97,000
+
 # Minimum edge per unit, after the unwind fee, before a tender is worth taking.
 # The edge swings across a tender's ~5-tick life, so the gate is re-evaluated
 # each cycle and fires on a good one rather than the first one.
@@ -485,8 +512,11 @@ ARB_THRESHOLD_CAD = 0.07
 #   v20_holdrevised - HOLD_TO_CLOSEOUT_TICK 175 -> 200. v12 halved the unwind
 #             cost, so holding saves 0.0249/unit instead of 0.0620 and is worth
 #             less, not more.
-RISK_MODEL = "v20_holdrevised"
-RISK_MODEL_DESC = "v19 plus: hold threshold back to 200 on a measured unwind cost"
+#   v21_grossreserve - the arb may only use gross that no tender needs. It was
+#             net-neutral and invisible to every net check while holding 224,000
+#             of gross and refusing 40,119 USD of tenders in one heat.
+RISK_MODEL = "v21_grossreserve"
+RISK_MODEL_DESC = "v20 plus: 200,000 of gross reserved for tenders, arb capped at 97,000"
 
 LOOP_SLEEP = 0.5    # between cycles inside a heat (~8 requests per cycle)
 WAIT_POLL = 2.0     # between polls while waiting for the next heat
@@ -1103,7 +1133,13 @@ def risk_metrics(pos):
     """
     gross = abs(pos[BULL]) + abs(pos[BEAR]) + 2 * abs(pos[RITC])
     net = pos[BULL] + pos[BEAR] + 2 * pos[RITC]
-    ok = (gross < MAX_GROSS) and (MAX_SHORT_NET < net < MAX_LONG_NET)
+    # PROJECTED gross, not current. One arb is ORDER_QTY of BULL, of BEAR and
+    # of RITC, and the ETF leg counts double, so it adds 4 x ORDER_QTY in the
+    # worst case where every leg pushes the same way. Checking current gross
+    # would let an arb start at 96,000 and finish at 116,000, spending 19,000
+    # of the tender reserve the check exists to protect.
+    projected = gross + 4 * ORDER_QTY
+    ok = (projected <= MAX_GROSS) and (MAX_SHORT_NET < net < MAX_LONG_NET)
     return gross, net, ok
 
 

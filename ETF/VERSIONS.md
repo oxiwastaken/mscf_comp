@@ -906,6 +906,62 @@ conservative, but the method was wrong and the tool should segment by regime.
 
 ---
 
+## `v21_grossreserve` - the arb was blocking tenders on gross
+
+v11 stopped the arb blocking tenders on NET. It then started blocking them on
+GROSS instead, and nothing caught it until v14 ran live and `backtest.py`
+attributed refusals by reason:
+
+    v14_holdout    gross 14,277   edge 7,548   net 5,883   (USD/heat)
+
+`gross` had never appeared as a refusal reason before. The position behind it:
+
+    tick 210   bull +55,000   bear +55,000   ritc -57,000   gross 224,000
+      -> refused 87,000 units at +0.2500 = +21,750 USD
+    tick 236   bull +50,000   bear +50,000   ritc -52,000   gross 204,000
+      -> refused 92,000 units at +0.1997 = +18,374 USD
+
+Net is -4,000 - perfectly hedged, invisible to every net check v11 added - but
+224,000 of gross, 75% of the cap. **40,119 USD refused in a single heat.**
+
+The arithmetic is not close. Over 438 logged arbs:
+
+| arb-gross cap | arbs blocked | cost at 120 CAD/arb |
+|---------------|--------------|---------------------|
+| 200,000 | 3% | ~24 CAD/heat |
+| 127,000 | 7% | ~55 CAD/heat |
+| **97,000** | **10%** | **~78 CAD/heat** |
+
+against 14,277 USD/heat of tenders. Reserving for the largest tender ever seen
+(100,000 units = 200,000 of gross) costs about 78 CAD a heat and guarantees the
+arb can never be the reason a tender is refused. The whole arb is worth 783
+CAD/heat; one blocked tender is worth ~10,000 USD.
+
+`MAX_GROSS` is now **derived**, not a magic number:
+
+    MAX_GROSS = SERVER_GROSS_LIMIT - LIMIT_BUFFER - TENDER_GROSS_RESERVE
+              = 300,000 - 3,000 - 200,000 = 97,000
+
+so changing the reserve or the buffer cannot leave a stale constant behind.
+
+The check is also on **projected** gross rather than current. One arb is
+`ORDER_QTY` of each leg with the ETF counting double, so it adds up to
+4 x ORDER_QTY = 20,000. Gating on current gross would let an arb start at
+96,000 and finish at 116,000, spending 19,000 of the reserve the check exists
+to protect.
+
+`test_cycle.py` asserts the invariant directly: whenever tender inventory is
+flat, everything left in gross belongs to the arb and must sit inside
+`MAX_GROSS`; and `MAX_GROSS + 200,000` must fit under the server cap.
+
+**Pattern worth naming.** This is the third time a control has been blind to an
+aggregate it could not attribute - per-chunk slippage could not see cost
+accruing across cycles (v8/v9), raw RITC position could not see which strategy
+owned the inventory (v11), and now a net-neutral arb was invisible to every
+check while quietly consuming the gross that tenders need.
+
+---
+
 ## Known open items
 
 - ~~`basket_rich` is negative (−0.0218/unit over 8 arbs)~~ — **RETRACTED.**

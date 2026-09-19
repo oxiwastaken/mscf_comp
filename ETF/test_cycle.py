@@ -161,6 +161,7 @@ def main():
     prehedge_orphan = None
     prehedge_fired = 0
     prev_prehedge = 0
+    arb_gross_breach = None
     for tick in range(301):
         ex.tick = ex.i = min(tick, len(quotes) - 1)
         try:
@@ -172,6 +173,17 @@ def main():
         if abs(bot.prehedge_position) > abs(prev_prehedge):
             prehedge_fired += 1
         prev_prehedge = bot.prehedge_position
+        # The gross reserve exists so the ARB can never be the reason a tender
+        # is refused. With tender inventory flat, everything left in gross is
+        # the arb's, and it must sit inside MAX_GROSS - otherwise the reserve
+        # has been spent and the next tender gets "gross would hit".
+        if (abs(bot.tender_position) <= bot.UNWIND_THRESHOLD
+                and not bot.prehedge_position):
+            pz = ex.positions
+            arb_gross = (abs(pz[bot.BULL]) + abs(pz[bot.BEAR])
+                         + 2 * abs(pz[bot.RITC]))
+            if arb_gross > bot.MAX_GROSS and arb_gross_breach is None:
+                arb_gross_breach = (tick, arb_gross)
         if tick == bot.HOLD_TO_CLOSEOUT_TICK - 1:
             at_threshold = bot.tender_position
             flat_before = abs(at_threshold) <= bot.UNWIND_THRESHOLD
@@ -198,6 +210,14 @@ def main():
           f"{len(st.resting.orders)} resting")
     # The pre-hedge may legitimately lag one cycle behind the ETF leg; it must
     # not be left on indefinitely.
+    check("the arb never spends the tender gross reserve",
+          arb_gross_breach is None,
+          f"gross {arb_gross_breach[1]:,} at tick {arb_gross_breach[0]} "
+          f"exceeds MAX_GROSS {bot.MAX_GROSS:,}" if arb_gross_breach else "")
+    check("the reserve covers the largest tender seen",
+          bot.MAX_GROSS + 2 * 100000 <= bot.SERVER_GROSS_LIMIT - bot.LIMIT_BUFFER,
+          f"{bot.MAX_GROSS + 200000:,} vs "
+          f"{bot.SERVER_GROSS_LIMIT - bot.LIMIT_BUFFER:,}")
     check("the pre-hedge path is exercised end to end", prehedge_fired > 0,
           f"fired {prehedge_fired}x")
     check("tracker agrees with the real position at the end",
