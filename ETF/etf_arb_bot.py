@@ -307,6 +307,44 @@ PASSIVE_CHUNK = 10000
 # tick of it.
 PASSIVE_REPRICE_TICKS = 1
 
+# --- hold to close-out ---------------------------------------------------
+# Past this tick, tender inventory is NOT unwound. It is left on the book for
+# the case to close out.
+#
+# The case is explicit: "Any non-zero position will be closed out at the end of
+# trading at either the last traded price or the correct price... participants
+# are not required to close statistical arbitrage positions as the iteration
+# ends." Close-out charges no commission and has no market impact, so relative
+# to the mid it costs 0. Measured against that, unwinding costs:
+#
+#     market order   -0.0550 (fill vs mid) - 0.0200 (fee)  = -0.0750/unit
+#     passive order  -0.0300 (bid+0.01 vs mid) + 0.0100    = -0.0200/unit
+#     close-out                                            =  0
+#
+# decompose_unwind.py measured that -0.0550 across 32 live tenders with a
+# standard deviation of 0.0304 - it is systematic, not noise, and it is 81% of
+# everything a tender gives back. On a median 85,000 unit tender the market
+# figure is 6,375 USD.
+#
+# The only thing the unwind buys is capacity for the NEXT tender, so the
+# question is how many more are still coming. Counted over 234 logged tenders,
+# the average number of LATER tenders in the same heat clearing the 0.08 bar:
+#
+#     arrives    0-29   30-59  60-89  90-119 120-149 150-179 180-209 210-239
+#     later      3.50    3.11   2.62    1.89    1.70    0.96    0.48    0.03
+#
+# After tick 210 a tender blocks essentially nothing. 200 is set one bucket
+# earlier, where 0.48 expected follow-ons at ~3,000 USD of realised value still
+# sit well under the 6,375 USD the unwind costs - roughly 2x in favour of
+# holding, rather than the 17x at 210, so the threshold does not depend on the
+# tail of that distribution being exactly right.
+#
+# Drift over the extra ticks is mean-zero (measured -0.0126/unit against a
+# 0.0779 sd), so holding trades a certain cost for an uncertain one with no
+# expected price. With the heat mean well short of the 40,000 target, that is
+# the right side of the trade to be on.
+HOLD_TO_CLOSEOUT_TICK = 200
+
 # --- tender pre-hedge ----------------------------------------------------
 # The largest tenders do not fit the net limit even on a completely flat book.
 # At the ETF's x2 multiplier a 99,000 unit tender is 198,000 of net against a
@@ -350,8 +388,11 @@ ARB_THRESHOLD_CAD = 0.07
 #             behind the glide path to flat.
 #   v13_prehedge - a small basket is put on to buy net room for tenders too
 #             large to fit the x2 net cap even on a flat book.
-RISK_MODEL = "v13_prehedge"
-RISK_MODEL_DESC = "v12 plus a basket pre-hedge that reaches oversized tenders"
+#   v14_holdout - tender inventory taken late in the heat is held for
+#             close-out rather than unwound, because close-out is free against
+#             the mid and the capacity it buys is worth almost nothing by then.
+RISK_MODEL = "v14_holdout"
+RISK_MODEL_DESC = "v13 plus: stop unwinding late in the heat, let close-out price it"
 
 LOOP_SLEEP = 0.5    # between cycles inside a heat (~8 requests per cycle)
 WAIT_POLL = 2.0     # between polls while waiting for the next heat
@@ -703,6 +744,7 @@ class UnwindState:
         self.peak = 0           # size to glide down from
         self.passive_qty = 0.0
         self.aggressive_qty = 0.0
+        self.holding = False    # latched so the hold prints once, not every cycle
 
     def reset(self):
         self.opened = None
@@ -797,6 +839,21 @@ def unwind_ritc(session, pos, book, snap, logs, heat, tick, cycle, st):
             st.resting.cancel_all(session, RITC)
         st.reset()
         return None, 0
+
+    # Too late in the heat for the capacity to be worth anything: hold the
+    # position and let close-out price it, which costs nothing against the mid.
+    if tick >= HOLD_TO_CLOSEOUT_TICK:
+        if st.resting.orders:
+            # A resting fill is cheaper than crossing but still worse than
+            # close-out, so once we have decided to hold, stop offering.
+            st.resting.cancel_all(session, RITC)
+        if not st.holding:
+            st.holding = True
+            print(f"  HOLD {target:+,} RITC to close-out (tick {tick} "
+                  f">= {HOLD_TO_CLOSEOUT_TICK}) - saves ~"
+                  f"{abs(target) * (0.055 + FEE_MKT):,.0f} of execution")
+        return None, 0
+    st.holding = False
 
     action = "SELL" if target > 0 else "BUY"
     # A resting order on the wrong side would build the position, not clear it.

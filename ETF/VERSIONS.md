@@ -418,6 +418,75 @@ One row was excluded: a netbar-era rejection of a legal 182,000 that today's
 absolute `LIMIT_BUFFER` already allows. The test reports the exclusion rather
 than quietly dropping it.
 
+## `v14_holdout` — stop unwinding late in the heat
+
+**First, the measurement that reframes the unwind.** `decompose_unwind.py`
+splits what a tender gives back into the two things it is actually made of,
+both against the *mid* rather than the touch, because a cost measured against a
+quote we are ourselves pushing cannot see the push:
+
+    tender price -> mid at accept : the edge the tender carried
+    mid at accept -> mid at fill  : DRIFT, the market moving while we hold
+    mid at fill  -> our fill      : EXECUTION, spread plus our own impact
+
+Pooled over 32 live tenders:
+
+| component                          | per unit | sd     |
+|------------------------------------|----------|--------|
+| execution (fill vs contemporary mid) | −0.0550 | 0.0304 |
+| drift (mid moved while held)         | −0.0126 | 0.0779 |
+
+**Execution is 81% of the give-back, and it is systematic** — a 0.0304 sd around
+a 0.0550 mean. Drift is the opposite: a mean near zero inside a spread six
+times its size, which is what a martingale looks like. Three versions (v8, v9,
+v10) argued about unwind *speed*; the number says the problem is unwind *cost*.
+
+**Then the rule that makes most of it optional.** The case: *"Any non-zero
+position will be closed out at the end of trading at either the last traded
+price or the correct price... participants are not required to close
+statistical arbitrage positions as the iteration ends."* Close-out charges no
+commission and has no impact, so against the mid it costs **zero**:
+
+| exit                           | vs mid  |
+|--------------------------------|---------|
+| market order                   | −0.0750 |
+| passive order (v12)            | −0.0200 |
+| close-out                      |  0      |
+
+On a median 85,000 unit tender the market figure is **6,375 USD**.
+
+The only thing the unwind buys is capacity for the *next* tender — so the
+question is purely how many more are coming. Over 234 logged tenders, the
+average number of later tenders in the same heat clearing the 0.08 bar:
+
+| arrives | 0–29 | 30–59 | 60–89 | 90–119 | 120–149 | 150–179 | 180–209 | 210–239 |
+|---------|------|-------|-------|--------|---------|---------|---------|---------|
+| later   | 3.50 | 3.11  | 2.62  | 1.89   | 1.70    | 0.96    | 0.48    | 0.03    |
+
+After tick 210 a tender blocks essentially nothing. `HOLD_TO_CLOSEOUT_TICK` is
+set to **200**, one bucket earlier, where 0.48 expected follow-ons at ~3,000
+USD of realised value still sit well under the 6,375 USD the unwind costs —
+about 2x in favour of holding rather than the 17x at 210, so the threshold does
+not depend on the tail of that distribution being exactly right.
+
+Past the threshold the unwind does nothing at all: no market orders, and
+resting passive orders are cancelled, because a resting fill (−0.0200) is
+cheaper than crossing but still worse than close-out (0).
+
+**What this trades.** A certain 0.0750/unit for an uncertain drift term with no
+expected price. With the heat mean well short of 40,000, that is the right side
+of the trade. The pre-hedge is deliberately left on too — `unwind_prehedge`
+only fires once the tender position has cleared, so a held position keeps its
+hedge and both legs close out at the correct price.
+
+An opposite-direction tender arriving after the threshold still works and is
+now doubly good: it clears the held position *and* pays us to do it. The
+existing `tender_safety` projection handles that without a special case.
+
+`sim_unwind.py` asserts the guard is a threshold and not an off switch: past it
+the position is untouched with no fills and nothing resting, and thirty ticks
+before it the unwind still runs to flat.
+
 ---
 
 ## Known open items

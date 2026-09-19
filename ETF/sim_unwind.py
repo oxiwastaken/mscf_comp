@@ -166,7 +166,7 @@ class NullLogs:
         self.ticks = self.tenders = self.heats = self.calib = self.runs = NullLog()
 
 
-def run(start_pos, quotes, passive, cycles=40, verbose=False):
+def run(start_pos, quotes, passive, cycles=40, verbose=False, tick0=0):
     ex = SimExchange(quotes)
     ex.position = start_pos
     # Route the bot's single API chokepoint at the simulator. Everything above
@@ -186,7 +186,7 @@ def run(start_pos, quotes, passive, cycles=40, verbose=False):
         book = ex.book()
         pos = {bot.RITC: ex.position, bot.BULL: 0, bot.BEAR: 0,
                bot.USD: 0, bot.CAD: 0}
-        bot.unwind_ritc(None, pos, book, snap, logs, 1, c, c, st)
+        bot.unwind_ritc(None, pos, book, snap, logs, 1, tick0 + c, c, st)
         resting = sum(o["quantity"] - o["quantity_filled"]
                       for o in ex.orders.values() if o["status"] == "OPEN")
         trace.append((c, ex.position, resting))
@@ -291,6 +291,21 @@ def main():
         check("passive does not delay the unwind vs v10",
               statistics.mean(p_flat) <= statistics.mean(m_flat) + 2,
               f"{statistics.mean(p_flat):.1f} vs {statistics.mean(m_flat):.1f} cycles")
+
+        # Past HOLD_TO_CLOSEOUT_TICK the position is deliberately left on the
+        # book for close-out, so the unwind must do nothing at all - no orders,
+        # no resting size, position untouched.
+        ex, st_h, trace = run(start, windows[0], passive=True,
+                              tick0=bot.HOLD_TO_CLOSEOUT_TICK)
+        check("late in the heat, the unwind holds instead of trading",
+              ex.position == start and not ex.fills and not st_h.resting.orders,
+              f"pos {ex.position:,} fills {len(ex.fills)} resting {len(st_h.resting.orders)}")
+        # One tick earlier it must still work normally, or the guard is not a
+        # threshold but an off switch.
+        ex, _, _ = run(start, windows[0], passive=True,
+                       tick0=bot.HOLD_TO_CLOSEOUT_TICK - 30)
+        check("just before the threshold it still unwinds",
+              abs(ex.position) <= bot.UNWIND_THRESHOLD, f"pos {ex.position:,}")
 
         pf = [x[0]["fees"] for x in rows[0][1]]
         mf = [x[0]["fees"] for x in rows[1][1]]
