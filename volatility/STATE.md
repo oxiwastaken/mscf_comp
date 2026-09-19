@@ -551,7 +551,7 @@ forty seconds. `hedgeable_legs` and the late-exit logic both behaved.
 
 2. Account flat, NLV 0.
 
-3. python test_engine.py            -> expect 139 passed, 0 failed
+3. python test_engine.py            -> expect 192 passed, 0 failed
 
 4. python autotrader.py --live --verbose
 
@@ -722,7 +722,7 @@ Case length is read live from `ticks_per_period`, never hardcoded.
 | `record.py` | Read-only capture of a live heat → `heats/*.jsonl` |
 | `replay.py` | Scores every mode on identical recorded ticks |
 | `sweep.py` | Parameter sweeps over the whole recording library. Paired per-heat comparison, bootstrapped 10-heat averages |
-| `test_engine.py` | 139 offline checks, no server needed |
+| `test_engine.py` | 192 offline checks, no server needed |
 
 `../volatility_research/` is a separate fork for higher-risk experiments, so this
 model is never put at risk. It shares these recordings rather than copying
@@ -1231,7 +1231,7 @@ live path). Redirect the output, because these print and do not save:
 
 ```
 cd volatility
-python test_engine.py                       # 180 offline checks
+python test_engine.py                       # 192 offline checks
 python replay_trader.py > ../out_replay.txt # real trader, order-accurate, P&L
 python penalty_from_log.py logs/auto_*.log  # what the delta penalty REALLY cost
 python timing_from_log.py logs/auto_*.log   # how long a resize takes vs a tick

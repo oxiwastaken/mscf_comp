@@ -19,7 +19,7 @@ pip install requests pandas numpy scipy py_vollib
 Start the RIT client, enable the REST API on port 9999, then:
 
 ```
-python test_engine.py                # 87 offline checks, no server needed
+python test_engine.py                # 192 offline checks, no server needed
 python dashboard.py --dry-run        # confirm it connects and parses correctly
 ```
 
@@ -71,7 +71,7 @@ not the vega ratio, is the test. See `structure.py`.
 | Exit when | vol gap < 0.3 points (the maker has learned) |
 | Max size | 875 contracts/leg with the structure on, 500 without |
 | Wing shorts | up to 750 contracts, at the two cheapest-vega legs |
-| Stops opening | last 10% of the case, where ATM delta flips violently |
+| Stops opening | last 13% of the case, where ATM delta flips violently |
 
 Safety: dry run by default, never opens what it can't hedge, respects live
 gross/net limits, refuses to trade without a two-sided quote, Ctrl-C exits
@@ -188,7 +188,7 @@ Trader `jobe-2`, password `exercise`. Live since 11 Sep through competition day.
 | `dashboard.py` | Live console |
 | `record.py` | Read-only capture of a heat → `heats/*.jsonl` |
 | `replay.py` | Scores volatility models on recorded heats |
-| `test_engine.py` | 87 offline checks |
+| `test_engine.py` | 192 offline checks |
 
 `RITCx Volatility Trading Case base script-REST API.py` is Rotman's original
 template, kept for reference only — it is not on the execution path. See
