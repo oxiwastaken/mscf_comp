@@ -85,7 +85,26 @@ FULL_SIZE_VOL_EDGE = 0.008
 EXIT_VOL_EDGE = 0.003
 # Stop opening new positions in the last fraction of the case: near expiry ATM
 # delta flips between +/-1 on tiny moves and hedging it becomes ruinous.
-NO_NEW_AFTER = 0.90
+#
+# 0.90 -> 0.87 on 205 recordings, paired: +$1,421 a heat (t 2.2), and the FINE
+# falls from $9,740 to $7,677 - a fifth of it. The surface is a broad plateau
+# with an interior optimum: 0.86 is +$1,179, 0.88 +$1,510, and it falls away on
+# both sides (0.83 is -$247, 0.90 is the reference). 0.87 is taken rather than
+# 0.88 because it sits INSIDE the plateau rather than next to the 0.89 cliff.
+#
+# The fine falls monotonically as this comes down - $9,740, $8,509, $7,980,
+# $7,677, $7,386 at 0.90 through 0.86 - which is the mechanism working exactly
+# as the physics says it should. The last ticks of a heat are nearly pure gamma
+# and nearly no vega: ATM delta flips between +/-1 on a few cents of spot, so
+# the book is charged for a breach it cannot hedge its way out of, in exchange
+# for vega that has already decayed to nothing. The worst heat in the library
+# improves from -$53,865 to -$27,200 on the same change.
+#
+# This was previously measured at -$1,437 and rejected. That reading came from
+# a backtest that priced the fine at $834 a heat against the server's $14,080,
+# so it could see the vega being given up and almost none of the gamma cost
+# being avoided. See the penalty fix in backtest.py.
+NO_NEW_AFTER = 0.87
 # Fraction of the heat after which the gross-capacity structure comes off,
 # leaving the plain straddle to run to the stand-down above.
 #
