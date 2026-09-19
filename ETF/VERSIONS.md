@@ -10,6 +10,57 @@ decisions are in `logs/calibration.csv`.
 
 ---
 
+## What the bot does now
+
+The history below is long and several entries are retractions, so this is the
+current behaviour in one place. Every parameter links to the version that
+justifies it.
+
+**Tenders are where the money is.** ~6 arrive per heat at 70,000–100,000 units;
+the spread arb is worth ~822 CAD/heat against tenders at 10–50x that.
+
+1. **Gate.** Each tender is re-scored every cycle of its ~6-cycle life and
+   fires on a good cycle, not the first one. The bar depends on how the
+   position will actually be exited (`v15`): before tick 175 it is priced
+   against a market unwind at chunk VWAP, less the 0.02 fee, and must clear
+   `MIN_TENDER_EDGE = 0.08`; at or after 175 it is priced against close-out at
+   the mid with no fee, and must clear `MIN_TENDER_EDGE_HELD = 0.04` — the
+   stricter of the two once both are put on the same footing.
+2. **Make room if needed.** A tender too large for the x2 net cap even on a
+   flat book gets a small BULL+BEAR pre-hedge to fit (`v13`). Never past gross,
+   never past the edge gate.
+3. **Exit, cheapest first** (`v14`, `v17`):
+   - **Hold** — past tick 175, nothing is traded. Close-out is free against the
+     mid and a tender that late blocks ~0.34 same-direction follow-ons.
+   - **Rest** — a 10,000-unit limit order at `bid + 0.01`, earning the 0.01
+     rebate instead of paying the 0.02 fee (`v12`).
+   - **Cross** — v11's depth-limited market chunker, only when behind an
+     8-cycle glide path to flat.
+4. **Never touch the arb's hedge leg.** The unwind targets `tender_position`,
+   not raw RITC (`v11`), and that tracker is reconciled to the live position
+   every cycle so it cannot ratchet (`v16`).
+
+**Key measured quantities**, all from live fills unless stated:
+
+| quantity | value | source |
+|----------|-------|--------|
+| execution cost of a market unwind | −0.0550/unit (sd 0.0304) | `decompose_unwind.py`, 32 tenders |
+| drift while holding | −0.0126/unit (sd 0.0779) — mean-zero | same |
+| uplift from exiting at close-out | +0.0626/unit | 385 logged tender books |
+| passive fill share | 12–15% | **simulated, not live** |
+| spread arb | +0.0248/unit net, ~822 CAD/heat | 412 arbs, 62 heats |
+
+**Offline suites** (no credentials needed, seconds to run):
+
+    python sim_unwind.py && python test_prehedge.py \
+      && python test_hold_gate.py && python test_cycle.py
+
+**Analysis tools:** `decompose_unwind.py` (execution vs drift),
+`analyze_tenders.py` (realised tender P&L), `sweep_deadline.py` and
+`sweep_holdtick.py` (parameter choice).
+
+---
+
 ## `ritc_x1` — Rotman base template
 
 Exposure counted as `BULL + BEAR + RITC`. Fixed `ARB_THRESHOLD_CAD = 0.07`,
