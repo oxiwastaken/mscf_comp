@@ -17,21 +17,21 @@ current behaviour in one place. Every parameter links to the version that
 justifies it.
 
 **Tenders are where the money is.** ~6 arrive per heat at 70,000–100,000 units;
-the spread arb is worth ~822 CAD/heat against tenders at 10–50x that.
+the spread arb is worth ~783 CAD/heat against tenders at 10–50x that.
 
 1. **Gate.** Each tender is re-scored every cycle of its ~6-cycle life and
    fires on a good cycle, not the first one. The bar depends on how the
-   position will actually be exited (`v15`): before tick 175 it is priced
+   position will actually be exited (`v15`): before tick 200 it is priced
    against a market unwind at chunk VWAP, less the 0.02 fee, and must clear
-   `MIN_TENDER_EDGE = 0.08`; at or after 175 it is priced against close-out at
-   the mid with no fee, and must clear `MIN_TENDER_EDGE_HELD = 0.04` — the
-   stricter of the two once both are put on the same footing.
+   `MIN_TENDER_EDGE = 0.04` (`v19` — break-even is +0.0138); at or after 200 it
+   is priced against close-out at the mid with no fee, and must clear
+   `MIN_TENDER_EDGE_HELD = 0.04` (`v15`, `v20`).
 2. **Make room if needed.** A tender too large for the x2 net cap even on a
    flat book gets a small BULL+BEAR pre-hedge to fit (`v13`). Never past gross,
    never past the edge gate.
-3. **Exit, cheapest first** (`v14`, `v17`):
-   - **Hold** — past tick 175, nothing is traded. Close-out is free against the
-     mid and a tender that late blocks ~0.34 same-direction follow-ons.
+3. **Exit, cheapest first** (`v14`, `v20`):
+   - **Hold** — past tick 200, nothing is traded. Close-out is *exact* and
+     free, proven live to 0.02%.
    - **Rest** — a 10,000-unit limit order at `bid + 0.01`, earning the 0.01
      rebate instead of paying the 0.02 fee (`v12`).
    - **Cross** — v11's depth-limited market chunker, only when behind an
@@ -39,16 +39,33 @@ the spread arb is worth ~822 CAD/heat against tenders at 10–50x that.
 4. **Never touch the arb's hedge leg.** The unwind targets `tender_position`,
    not raw RITC (`v11`), and that tracker is reconciled to the live position
    every cycle so it cannot ratchet (`v16`).
+5. **The arb may not spend gross a tender needs.** 200,000 is reserved,
+   capping the arb at 97,000 (`v21`). It cost tenders 14,277 USD/heat before.
 
-**Key measured quantities**, all from live fills unless stated:
+**Where we stand against the 40,000 target** (`python heat_report.py`,
+`python backtest.py`):
+
+| sample | n | mean/heat |
+|--------|---|-----------|
+| all full 300-tick heats that saw tenders | 21 | 13,449 |
+| v14/v17 live heats, per 300 ticks | 7 | ~22,000 |
+| best full heat under the new code (v14 h2) | 1 | **+40,012** |
+
+Per-heat sd is 21,447, so the 95% CI on any of these is roughly +/-9,600 with
+the samples available. That is the reason parameters are settled structurally
+here and not by comparing heat averages.
+
+**Key measured quantities:**
 
 | quantity | value | source |
 |----------|-------|--------|
-| execution cost of a market unwind | −0.0550/unit (sd 0.0304) | `decompose_unwind.py`, 32 tenders |
-| drift while holding | −0.0126/unit (sd 0.0779) — mean-zero | same |
-| uplift from exiting at close-out | +0.0626/unit | 385 logged tender books |
-| passive fill share | 12–15% | **simulated, not live** |
-| spread arb | +0.0248/unit net, ~822 CAD/heat | 412 arbs, 62 heats |
+| execution, aggressive unwind | -0.0420/unit | v10, 12 tenders |
+| execution, passive unwind | **-0.0229/unit** | v14 live, 8 tenders |
+| drift while holding | -0.0164/unit (sd 0.0740) - mean-zero | 41 tenders |
+| passive fill share | **46-70% live** (simulated 12-15%) | v14 heats |
+| close-out accuracy | **exact** - expected 24,430 USD, got 24,913 CAD | v17 live heat |
+| tender break-even, gate basis | +0.0138 (se 0.0058) | two estimators agreeing |
+| spread arb | +0.0248/unit net, 783 CAD/heat | 438 arbs, 67 heats |
 
 **Offline suites** (no credentials needed, seconds to run):
 
@@ -57,7 +74,9 @@ the spread arb is worth ~822 CAD/heat against tenders at 10–50x that.
 
 **Analysis tools:** `decompose_unwind.py` (execution vs drift),
 `analyze_tenders.py` (realised tender P&L), `sweep_deadline.py` and
-`sweep_holdtick.py` (parameter choice).
+`sweep_holdtick.py`, `sweep_tenderbar.py` (parameter choice), `backtest.py`
+(per-heat attribution -> `logs/scoreboard.csv`), `heat_report.py` (headline vs
+target).
 
 ---
 
@@ -976,7 +995,7 @@ check while quietly consuming the gross that tenders need.
 - **Converters are unusable.** Human-only per the case rules, so a tender
   position can only be unwound into the market — or, since v14, held for
   close-out, which is the cheaper of the two and needs no converter.
-- **Spread arb is ~822 CAD/heat**, not the ~10k previously recorded: 412 arbs
+- **Spread arb is ~783 CAD/heat**, not the ~10k previously recorded: 412 arbs
   over 62 heats at +0.0248/unit net of fees. Tenders are worth 10-50x that.
   Effort belongs on tender capture and exit choice.
 - **Nothing since v11 has run live.** v12–v16 are validated only against logged
