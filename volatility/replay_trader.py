@@ -163,8 +163,26 @@ def replay(path, verbose=False):
         trader.log = lambda _text: None
 
     peak_delta = peak_shares = 0.0
+    penalty = 0.0
     for index in range(len(snapshots)):
         client.index = index
+        # The fine is charged on the book as it stands when the second is
+        # sampled - BEFORE this tick's trader can react to it - and on the
+        # delta the SERVER measures, which is priced at the market's vol
+        # whatever the trader hedges against. Charge it first, for the same
+        # reason backtest.py does.
+        try:
+            before = vol_engine.build_chain(
+                client.securities(), snapshots[index]['case'].get('tick', 0),
+                snapshots[index]['case'].get('ticks_per_period') or 300,
+                {}, mode=config.TAIL_VOL_MODE)
+            seen = before.get('server_delta')
+            if seen is None:
+                seen = before['portfolio_delta']
+            breach = max(abs(float(seen)) - config.DELTA_LIMIT, 0.0)
+            penalty += breach * config.DELTA_PENALTY_RATE
+        except (ValueError, KeyError):
+            pass
         trader.step()
         snap = snapshots[index]
         tick = snap['case'].get('tick', 0)
@@ -177,8 +195,12 @@ def replay(path, verbose=False):
         peak_delta = max(peak_delta, abs(chain['portfolio_delta']))
         peak_shares = max(peak_shares,
                           abs(client.positions.get(config.UNDERLYING, 0)))
+    # P&L net of the fine. It used to be fills and fees only, which made this
+    # blind to the single largest cost any hedging change moves - a policy that
+    # halved the fine scored WORSE here purely because the saving was invisible.
     return (client.breaches, client.orders, peak_delta, peak_shares,
-            client.settle(), client.contracts, client.shares)
+            client.settle() - penalty, client.contracts, client.shares,
+            penalty)
 
 
 def main():
@@ -208,11 +230,12 @@ def main():
     pnls = []
     for path in files:
         (breaches, orders, peak_delta, peak_shares,
-         pnl, contracts, shares) = replay(path, args.verbose)
+         pnl, contracts, shares, penalty) = replay(path, args.verbose)
         name = os.path.basename(path)
         status = 'OK  ' if not breaches else 'FAIL'
         pnls.append((name, pnl))
         print(f'  {status} {name:<30} P&L ${pnl:>10,.0f}   '
+              f'fine ${penalty:>8,.0f}   '
               f'{contracts:>6,} contracts  {shares:>7,} shares   '
               f'peak delta {peak_delta:>8,.0f}   peak RTM {peak_shares:>7,.0f}')
         for breach in breaches[:3]:

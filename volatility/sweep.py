@@ -27,6 +27,7 @@ import autotrader as at
 import backtest
 import config
 import structure
+import vol_engine
 from replay import load
 
 # One-at-a-time sweeps. Each entry is a parameter and the values to try; the
@@ -89,6 +90,7 @@ def usable_heats(min_ticks=250, settling=90):
 
 
 MODULES = {'config': config, 'backtest': backtest, 'structure': structure,
+           'vol_engine': vol_engine,
            'autotrader': at, '': at}
 
 

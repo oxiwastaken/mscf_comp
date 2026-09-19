@@ -226,7 +226,15 @@ def run(snapshots, policy, verbose=False):
         # the fine costs more than it saves" was drawn from the old column, and
         # a model that prices a $14,000 cost at $834 cannot rank changes that
         # trade against it - it will reject all of them.
-        breach = max(abs(float(chain['portfolio_delta'])) - config.DELTA_LIMIT, 0.0)
+        # `server_delta` is priced at the market's vol whatever the trader
+        # hedges against, because that is what the CRO charges on. Reading
+        # `portfolio_delta` here would make the fine cheaper simply by changing
+        # what we choose to measure - and the whole point of this column is to
+        # rank policies that trade against it.
+        seen = chain.get('server_delta')
+        if seen is None:
+            seen = float(chain['portfolio_delta'])
+        breach = max(abs(float(seen)) - config.DELTA_LIMIT, 0.0)
         if breach:
             charge = breach * config.DELTA_PENALTY_RATE
             book.cash -= charge

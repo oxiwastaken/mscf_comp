@@ -156,6 +156,45 @@ def blended_sigma(tick, ticks_total, week_vols, market_iv=None,
     return math.sqrt(total_var / total_weight), detail
 
 
+# Price the GREEKS at the market's implied vol rather than at our forecast.
+#
+# The server's delta limit - the thing that fines us - is computed against the
+# market, not against our opinion, and those are different numbers precisely
+# when we hold a position. Full argument in build_chain below.
+#
+# ON since 19 Sep. Order-accurate over 120 recordings with the fine included:
+# +$6,719 a heat (t 3.2), and the fine itself falls from $15,255 to $5,838.
+# Peak |delta| over the same heats drops from 44,645 to 20,280.
+#
+# Set False to revert to hedging at the forecast. An earlier attempt at this
+# idea had to be reverted after a live heat with over $100k of fines - it used
+# each row's OWN solved IV instead of the chain average. See STATE.md.
+HEDGE_AT_MARKET_IV = True
+
+
+def _delta_at(rows, underlying_position, spot, t_years, vol):
+    """
+    Portfolio delta priced at `vol` - used for the delta the SERVER sees.
+
+    Returns None when there is no market vol to price with, so callers can
+    tell "no position" apart from "cannot measure".
+    """
+    if not vol or t_years <= 0 or not spot:
+        return None
+    total = float(underlying_position)
+    for row in rows:
+        position = row.get('position') or 0
+        if not position:
+            continue
+        try:
+            delta = analytical.delta(row['flag'], spot, row['strike'], t_years,
+                                     config.RISK_FREE_RATE, vol)
+        except Exception:
+            continue
+        total += position * delta * config.CONTRACT_MULTIPLIER
+    return total
+
+
 def build_chain(securities, tick, ticks_total, week_vols, mode=None):
     """
     Assemble the full analysis for one refresh.
@@ -269,16 +308,44 @@ def build_chain(securities, tick, ticks_total, week_vols, mode=None):
         if not forecast or t_years <= 0:
             continue
 
+        # VALUE is our opinion; RISK is the server's measurement. The CRO's
+        # delta limit is computed against the MARKET's implied vol, and the
+        # limit is the thing that fines us - so fair value is priced at our
+        # forecast and the greeks at the market's vol.
+        #
+        # Those differ precisely when we hold a position, because a
+        # disagreement with the market is the only reason to have one. Heat
+        # 22:40, ticks 188-205: our greeks put the book at +530 to +7,319
+        # delta - inside the band, so no hedge was sent - while the same book
+        # at market IV was +23,157 to +35,222, and the server's own figure,
+        # recovered by inverting the fine, tracked the market-IV number. Of
+        # that heat's $46,379 fine, $39,870 was charged while the trader
+        # believed it was flat.
+        #
+        # The CHAIN AVERAGE, not each row's own solve. An earlier attempt used
+        # `row['market_iv']` and made things worse, because that number is
+        # unreliable exactly where it matters: a low-vega wing whose two-cent
+        # quote pins its IV no better than 30 vol points can solve anywhere,
+        # and a garbage IV produces a garbage delta. `MAX_IV_SPREAD` exists for
+        # that reason, and `market_avg_iv` is the vega-weighted average it
+        # already makes trustworthy. The case also guarantees this is the right
+        # shape: one expiry, one pricing model, no smile - every strike must
+        # show the same IV, confirmed live at 0.18% across the high-vega legs.
+        #
+        # Falling back to the forecast when the market gives nothing to price
+        # with is deliberate: an approximate delta still hedges, and no delta
+        # at all leaves the book blind near expiry, which is where the gamma is.
+        hedge_vol = (market_avg_iv or forecast) if HEDGE_AT_MARKET_IV else forecast
         try:
             fair = black_scholes(row['flag'], spot, row['strike'], t_years,
                                  config.RISK_FREE_RATE, forecast)
             row['fair'] = fair
             row['delta'] = analytical.delta(row['flag'], spot, row['strike'],
-                                            t_years, config.RISK_FREE_RATE, forecast)
+                                            t_years, config.RISK_FREE_RATE, hedge_vol)
             row['gamma'] = analytical.gamma(row['flag'], spot, row['strike'],
-                                            t_years, config.RISK_FREE_RATE, forecast)
+                                            t_years, config.RISK_FREE_RATE, hedge_vol)
             row['vega'] = analytical.vega(row['flag'], spot, row['strike'],
-                                          t_years, config.RISK_FREE_RATE, forecast)
+                                          t_years, config.RISK_FREE_RATE, hedge_vol)
         except Exception:
             continue
 
@@ -307,6 +374,14 @@ def build_chain(securities, tick, ticks_total, week_vols, mode=None):
         'forecast': forecast,
         'forecast_detail': detail,
         'market_avg_iv': market_avg_iv,
+        # The delta the SERVER measures, always at the market's vol and
+        # independent of HEDGE_AT_MARKET_IV. The fine is charged on this
+        # whatever the trader chooses to hedge against, so anything scoring the
+        # fine must read it here - otherwise flipping the flag would change the
+        # measurement as well as the behaviour, and the comparison would be
+        # between two different cost models rather than two policies.
+        'server_delta': _delta_at(rows, underlying.get('position', 0) or 0,
+                                  spot, t_years, market_avg_iv),
         'underlying_position': underlying.get('position', 0) or 0,
         'underlying_fee': (underlying.get('trading_fee')
                            if underlying.get('trading_fee') is not None
