@@ -11,6 +11,7 @@ cd "$(dirname "$0")" || exit 1
 STALL=900          # seconds without a heat before shouting
 last=$(wc -l < results.csv)
 pinned_log=""
+was_running=1
 seen=$(date +%s)
 
 while true; do
@@ -41,12 +42,25 @@ while true; do
         fi
     fi
 
-    if ! tasklist //FI "IMAGENAME eq python.exe" //FO CSV 2>/dev/null | grep -q python.exe; then
-        echo "ALARM no python processes - the overnight runner is DEAD"
-        sleep 120
-    elif [ $(( $(date +%s) - seen )) -gt "$STALL" ]; then
-        echo "ALARM no heat finished in $(( ($(date +%s) - seen) / 60 )) minutes - runner stalled"
-        seen=$(date +%s)
+    # A stalled runner is only news if a runner is supposed to be running.
+    # Between the overnight run and the competition the machine is
+    # DELIBERATELY idle, and a watcher that shouts every fifteen minutes
+    # through that is noise at exactly the moment attention is scarce.
+    if tasklist //FI "IMAGENAME eq python.exe" //FO CSV 2>/dev/null | grep -q python.exe; then
+        if [ "$was_running" = "0" ]; then
+            echo "NOTE trading processes are up again"
+            seen=$(date +%s)
+        fi
+        was_running=1
+        if [ $(( $(date +%s) - seen )) -gt "$STALL" ]; then
+            echo "ALARM no heat finished in $(( ($(date +%s) - seen) / 60 )) minutes - runner stalled"
+            seen=$(date +%s)
+        fi
+    else
+        if [ "$was_running" = "1" ]; then
+            echo "ALARM all trading processes have STOPPED"
+        fi
+        was_running=0
     fi
     sleep 20
 done
