@@ -30,9 +30,35 @@ edits, so a revert is not live until it is committed. That guard is deliberate.
 
 | commit | live path state | why you would go back to it |
 |---|---|---|
-| `454ba6c` | `NO_NEW_AFTER = 0.87` | current |
-| `fd4a94e` | `NO_NEW_AFTER = 0.90`, heat-state fix in | if 0.87 disappoints over ~15 heats |
-| `be66fd4` | the build that traded all night to 02:30 | full rollback; loses the cross-heat state fix, which is a genuine competition-day bug — prefer the row above |
+| `217aff3` | **hedge at MARKET IV** | current |
+| `eac7f96` | hedge at forecast IV, `HEDGE_TARGET 3,000` | **the one-line rollback for the market-IV change** |
+| `fd4a94e` | `NO_NEW_AFTER = 0.90`, heat-state fix in | if tonight's tuning disappoints over ~15 heats |
+| `be66fd4` | the build that traded all night to 02:30 | full rollback; loses the cross-heat state fix, which is a genuine competition-day bug — prefer the rows above |
+
+### ROLLBACK TRIGGER for the market-IV hedge (`217aff3`)
+
+This is the largest change of the night and **the same idea failed live once
+already** (`29ea36c`, reverted in `2c51f1e` after a heat with >$100k of fines).
+The implementation is different — chain average, not each row's own solve — and
+it is validated order-accurate with the fine charged. But watch it.
+
+Roll back immediately if ANY of these show up over the next few heats:
+
+- a single heat with a fine over **$40,000**
+- five heats averaging a fine over **$20,000** (the forecast-IV build ran
+  ~$15,000, so anything above that means it is going the wrong way)
+- repeated `CANNOT HEDGE` lines in the trader log — that is the 50,000-share
+  pin, which 4 heats in 120 reach by design
+
+The rollback is one line, and it does not need a revert of the whole commit —
+the measurement improvements in it are worth keeping:
+
+```
+cd volatility
+sed -i 's/^HEDGE_AT_MARKET_IV = True$/HEDGE_AT_MARKET_IV = False/' vol_engine.py
+python test_engine.py                       # expect 192 passed
+git commit -am "revert to hedging at forecast IV"
+```
 
 `be66fd4` is the "30-40 minutes ago" save state: it is the model that produced
 the $144,175 mean over 25 heats, and nothing about a heat's behaviour differs
