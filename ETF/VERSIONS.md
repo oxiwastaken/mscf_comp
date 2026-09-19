@@ -1099,6 +1099,37 @@ tenders realised +0.338/unit, measured in USD, should not be relied on.
 - **The FX treatment is fine.** Keeping USD until close-out instead of
   converting is +1,274/heat (t +0.22) with a higher sd; no change.
 
+## `v24_swap` - take blocked tenders by dumping for them
+
+**How the case is scored changes what "better" means.** Per the RITCx page, ETF
+arbitrage teams are ranked per heat by P&L and the heat ranks are averaged. A
++140,000 heat earns no more than first place; a -50,000 heat can mean last. So
+policies are now judged on their downside (10th/25th percentile heat, losing
+heats) as well as their mean - `structural.py` reports both.
+
+Two structural ideas were tested on the replay harness, 41 full heats, paired:
+
+| policy | mean | median | p10 | p25 | sd | paired vs live |
+|---|---|---|---|---|---|---|
+| live (v23) | +56,044 | +61,354 | +816 | +33,694 | 44,279 | - |
+| swap, dump cost 0.10 | +58,972 | +61,515 | +816 | +34,050 | 47,547 | +2,929 (t +3.17) |
+| hedge 100% held, 0.03/leg | +45,693 | +45,495 | +7,731 | +28,836 | 29,341 | -10,350 (t -2.38) |
+
+**Swap - adopted.** When a tender clears the edge bar but not the limits, dump
+just enough same-direction tender inventory at market to fit, if its edge pays
+for the dump. Positive at every dump cost tested (it self-limits), significant
+up to 0.15, replicates in both halves (+3,746 / +2,150), downside unchanged,
+~0.3 swaps a heat. The live decision assumes `SWAP_DUMP_COST = 0.15`, near the
+~0.14 walk plus fee that v8/v9 paid pushing ~90,000 units out at once. Only
+tender inventory is ever dumped, never the arb's legs. `test_swap.py` covers the
+sizing, the no-pay case, direction, the arb legs, and partial fills.
+
+**Basket hedge of held inventory - rejected.** It does what it says to risk (sd
+44k to 29k, p10 +0.8k to +7.7k) but costs the typical heat: median -16k, p25
+-5k, mean -10k, and the loss replicates in both halves. Ranks are averaged over
+heats, so the typical heat matters more than the worst one; this only pays if
+the field turns out to cluster around our worst outcomes.
+
 ## Known open items
 
 - ~~`basket_rich` is negative (−0.0218/unit over 8 arbs)~~ — **RETRACTED.**

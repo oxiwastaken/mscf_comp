@@ -464,6 +464,25 @@ HOLD_TO_CLOSEOUT_TICK = 200
 # - and it is a genuine hedge rather than a limits trick: short basket against
 # long ETF lowers the directional exposure carried through the unwind.
 PREHEDGE = True
+
+# Swap: take a tender that clears the edge bar but not the position limits, by
+# dumping just enough of our existing same-direction tender inventory at market
+# to make it fit - but only when the new tender's edge pays for the dump.
+#
+# Sized on the replay harness (replay_tenders.py / structural.py) over 41 full
+# heats, paired against the live policy: +2,929/heat at a 0.10 dump cost
+# (t +3.17), replicating in both halves of the sample (+3,746 / +2,150), with
+# the downside unchanged - same 10th percentile, same losing heats. It fires
+# ~0.3 times a heat.
+#
+# SWAP_DUMP_COST is what the decision ASSUMES a dump costs per unit against the
+# mid. It is set to 0.15, near the ~0.14 book walk plus 0.02 fee seen when v8/v9
+# pushed ~90,000 units out at once: the rule then only swaps when the edge
+# clears a pessimistic cost, and stays positive in replay up to a real cost of
+# 0.40 because it self-limits.
+SWAP = True
+SWAP_DUMP_COST = 0.15
+SWAP_MARGIN = 1_000   # dump this much beyond the bare minimum, for rounding
 # Cap per side. Sized to cover the whole observed shortfall (max 3,000 of net,
 # so 1,500 a side) with room to spare, while staying small enough that a hedge
 # left on by a failed accept is a rounding error rather than a position.
@@ -515,8 +534,8 @@ ARB_THRESHOLD_CAD = 0.07
 #   v21_grossreserve - the arb may only use gross that no tender needs. It was
 #             net-neutral and invisible to every net check while holding 224,000
 #             of gross and refusing 40,119 USD of tenders in one heat.
-RISK_MODEL = "v23_agreedclamp"
-RISK_MODEL_DESC = "v22 plus: a confirmed clamp writes back only the shrink both reads agree on"
+RISK_MODEL = "v24_swap"
+RISK_MODEL_DESC = "v23 plus: dump inventory to take a blocked tender when its edge pays for it"
 
 LOOP_SLEEP = 0.5    # between cycles inside a heat (~8 requests per cycle)
 WAIT_POLL = 2.0     # between polls while waiting for the next heat
@@ -1379,7 +1398,61 @@ def unwind_prehedge(session, pos, logs, heat, tick, snap):
     return qty
 
 
-def handle_tenders(session, logs, heat, tick, snap, quotes, pos, books):
+def swap_for_tender(session, offer, edge, pos, st, logs, heat, tick, snap):
+    """Dump same-direction tender inventory so `offer` fits. Returns units dumped.
+
+    Only tender inventory is ever dumped - never the arb's legs - and only as
+    much as the limits require. See SWAP for the evidence and the cost model.
+    """
+    global tender_position
+    qty = float(offer.get("quantity") or 0)
+    signed = qty if (offer.get("action") or "").upper() == "BUY" else -qty
+    ritc = pos.get(RITC, 0)
+    if not qty or tender_position * signed <= 0 or ritc * signed <= 0:
+        return 0
+    s = 1 if signed > 0 else -1
+    basket = pos.get(BULL, 0) + pos.get(BEAR, 0)
+    legs = abs(pos.get(BULL, 0)) + abs(pos.get(BEAR, 0))
+    need_net = (s * (basket + 2 * (ritc + signed)) - (SERVER_NET_LIMIT - LIMIT_BUFFER)) / 2
+    need_gross = s * (ritc + signed) - (SERVER_GROSS_LIMIT - LIMIT_BUFFER - legs) / 2
+    need = max(need_net, need_gross, 0)
+    need = int(-(-(need + SWAP_MARGIN) // 1000) * 1000)
+    if need <= 0 or need > abs(tender_position) or need > abs(ritc):
+        return 0
+    if edge * qty <= SWAP_DUMP_COST * need:
+        print(f"    swap skipped: edge {edge * qty:,.0f} does not pay a "
+              f"{need:,} dump at {SWAP_DUMP_COST}")
+        return 0
+
+    # A resting passive order would keep working the inventory we are about to
+    # dump and could fill afterwards, overshooting flat.
+    if st is not None and st.resting.orders:
+        st.resting.cancel_all(session, RITC)
+
+    action = "SELL" if s > 0 else "BUY"
+    done = 0.0
+    while done < need:
+        q = min(need - done, MAX_SIZE_EQUITY)
+        try:
+            resp = place_mkt(session, RITC, action, q)
+        except ApiException as e:
+            print(f"    swap dump failed: {e}")
+            break
+        filled = float((resp or {}).get("quantity_filled") or 0)
+        if filled <= 0:
+            break
+        _log_fill(logs, heat, tick, action, filled, (resp or {}).get("vwap"),
+                  snap, "swap_dump", "", (resp or {}).get("order_id"))
+        done += filled
+    if done:
+        pos[RITC] = ritc - s * done
+        tender_position -= s * done
+    print(f"    SWAP dumped {done:,.0f} RITC ({action}) to make room for "
+          f"{offer.get('action')} {qty:,.0f} at edge {edge:+.4f}")
+    return int(done)
+
+
+def handle_tenders(session, logs, heat, tick, snap, quotes, pos, books, st=None):
     """Log every active tender, then decide whether to accept it.
 
     Ordering is the whole point here. The previous version attempted the accept
@@ -1416,6 +1489,15 @@ def handle_tenders(session, logs, heat, tick, snap, quotes, pos, books):
                 safe, reason, edge = tender_safety(
                     offer, pos, book, snap["usd_bid"], snap["usd_ask"], tick)
                 reason = f"{reason} after prehedge {hedged:,}"
+        # The limit check runs after the edge check, so a limit refusal means
+        # the edge already cleared its bar.
+        dumped = 0
+        if SWAP and not safe and edge is not None and " would hit " in reason:
+            dumped = swap_for_tender(session, offer, edge, pos, st, logs, heat, tick, snap)
+            if dumped:
+                safe, reason, edge = tender_safety(
+                    offer, pos, book, snap["usd_bid"], snap["usd_ask"], tick)
+                reason = f"{reason} after swap dump {dumped:,}"
         side = "asks" if (offer.get('action') or '').upper() == "SELL" else "bids"
         chunk_ref, _ = vwap_for_qty(book.get(side) or [], UNWIND_CHUNK)
         visible = sum(float(r.get("quantity", 0) or 0) for r in (book.get(side) or []))
@@ -1549,7 +1631,8 @@ def step_once(session, logs, heat, tick, bases, cycle, st):
     }
 
     pos, quotes = positions_map(session)
-    tenders_seen, tenders_accepted = handle_tenders(session, logs, heat, tick, snap, quotes, pos, books)
+    tenders_seen, tenders_accepted = handle_tenders(
+        session, logs, heat, tick, snap, quotes, pos, books, st)
 
     gross, net, ok = risk_metrics(pos)
     nlv = get_nlv(session)

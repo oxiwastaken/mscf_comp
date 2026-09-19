@@ -91,6 +91,7 @@ class Heat:
     close_mid: float
     usd_close: float
     usd: dict = field(default_factory=dict)            # tick -> USD/CAD mid
+    nav: dict = field(default_factory=dict)            # tick -> BULL mid + BEAR mid, CAD
     obs: list = field(default_factory=list)
     live_accepts: dict = field(default_factory=dict)   # tid -> tick accepted
     flickered: set = field(default_factory=set)        # tids hit by a flicker
@@ -104,7 +105,7 @@ def load_heats():
         if None not in (ft, lt, pnl) and ft <= 5 and lt >= 295:
             meta[(r.get("run_id"), r.get("heat"))] = (r.get("risk_model"), pnl)
 
-    mids, usd, pos = defaultdict(dict), defaultdict(dict), defaultdict(list)
+    mids, usd, pos, nav = defaultdict(dict), defaultdict(dict), defaultdict(list), defaultdict(dict)
     for r in _rows("ticks*.csv"):
         k = (r.get("run_id"), r.get("heat"))
         if k not in meta:
@@ -119,6 +120,9 @@ def load_heats():
         p = _f(r.get("pos_ritc"))
         if p is not None:
             pos[k].append((t, p))
+        bb, ba, eb, ea = (_f(r.get(c)) for c in ("bull_bid", "bull_ask", "bear_bid", "bear_ask"))
+        if bb and ba and eb and ea and 0 < bb < ba < 100 and 0 < eb < ea < 100:
+            nav[k][t] = (bb + ba) / 2 + (eb + ea) / 2
 
     obs, accepts, seen = defaultdict(list), defaultdict(dict), set()
     for r in _rows("tenders*.csv"):
@@ -158,7 +162,7 @@ def load_heats():
             continue
         close_mid = mids[k][max(late)]
         usd_close = usd[k][max(usd[k])] if usd[k] else 1.0
-        h = Heat(k, model, pnl, mids[k], close_mid, usd_close, usd[k],
+        h = Heat(k, model, pnl, mids[k], close_mid, usd_close, usd[k], nav[k],
                  sorted(obs[k], key=lambda o: o.tick), accepts[k])
         h.flickered = _flickers(pos[k], accepts[k])
         heats.append(h)
@@ -192,17 +196,33 @@ class Policy:
     net_cap: float = 197_000      # server net 200,000 less the 3,000 buffer
     strand_on_flicker: bool = False   # the v16-v21 tracker write-back bug
     fx_live: bool = True          # convert USD flows as they happen (live bot)
+    # Structural options, off by default so the validated baseline is untouched.
+    swap: bool = False            # dump inventory to make room for a blocked tender
+    dump_cost: float = 0.10       # per unit vs mid for an immediate market dump
+    hedge_frac: float = 0.0       # share of HELD RITC hedged with BULL + BEAR
+    basket_cost: float = 0.03     # per share per leg to put the hedge on
+    gross_cap: float = 297_000    # server gross 300,000 less the buffer
 
 
-def passes_gate(o, position, pol):
-    signed = -o.qty if o.action == "SELL" else o.qty
-    if abs(2 * (position + signed)) > pol.net_cap:      # RITC counts x2
-        return False
+def tender_edge(o, pol):
+    """Edge per unit on the exit this tender will actually take, and its bar."""
     if o.tick >= pol.hold_tick:
         edge = (o.price - o.mid) if o.action == "SELL" else (o.mid - o.price)
-        return edge >= pol.min_edge_held
+        return edge, pol.min_edge_held
     edge = (o.price - o.unwind_ref) if o.action == "SELL" else (o.unwind_ref - o.price)
-    return edge - FEE >= pol.min_edge
+    return edge - FEE, pol.min_edge
+
+
+def fits(position, signed, basket, pol):
+    """Server limits after accepting: RITC counts x2, BULL and BEAR x1 each."""
+    net = 2 * (position + signed) + 2 * basket
+    gross = 2 * abs(position + signed) + 2 * abs(basket)
+    return abs(net) <= pol.net_cap and gross <= pol.gross_cap
+
+
+def passes_gate(o, position, pol, basket=0.0):
+    edge, bar = tender_edge(o, pol)
+    return edge >= bar and fits(position, -o.qty if o.action == "SELL" else o.qty, basket, pol)
 
 
 def simulate(heat, pol, flicker=frozenset(), forced=None):
@@ -215,11 +235,12 @@ def simulate(heat, pol, flicker=frozenset(), forced=None):
     for o in heat.obs:
         by_tick[o.tick].append(o)
 
-    cad = position = stranded = 0.0
+    cad = position = stranded = basket = 0.0
     glide_tick, glide_from = None, 0.0
-    taken, mid, fx = {}, None, None
+    taken, mid, fx, nav = {}, None, None, None
     for t in range(LAST_TICK + 1):
         mid = heat.mids.get(t, mid)
+        nav = heat.nav.get(t, nav)
         fx = heat.usd.get(t, fx) if pol.fx_live else heat.usd_close
         rate = fx or heat.usd_close
 
@@ -234,15 +255,42 @@ def simulate(heat, pol, flicker=frozenset(), forced=None):
                 cad -= trade * fill * rate
                 position += trade
 
+        # Hedge HELD inventory with the basket. Close-out prices BULL and BEAR
+        # too, so the hedge costs only its entry; what is left is the RITC-NAV
+        # gap rather than the whole NAV (and the FX that moves it).
+        if pol.hedge_frac and nav and t >= pol.hold_tick:
+            room = max(pol.gross_cap - 2 * abs(position), 0) / 2
+            want = max(-room, min(room, -pol.hedge_frac * position))
+            if abs(want - basket) >= 5_000:
+                d = want - basket
+                cad -= d * nav + abs(d) * 2 * pol.basket_cost
+                basket = want
+
         for o in by_tick.get(t, ()):
             if o.tid in taken:
                 continue
+            signed = -o.qty if o.action == "SELL" else o.qty
             if forced is not None:
                 if forced.get(o.tid) != t:
                     continue
-            elif not passes_gate(o, position, pol):
-                continue
-            signed = -o.qty if o.action == "SELL" else o.qty
+            else:
+                edge, bar = tender_edge(o, pol)
+                if edge < bar:
+                    continue
+                if not fits(position, signed, basket, pol):
+                    # Swap: dump just enough same-direction inventory to fit,
+                    # if the new tender's edge pays for the dump.
+                    need = abs(position + signed) - pol.net_cap / 2
+                    same = position * signed > 0
+                    if not (pol.swap and same and mid and 0 < need <= abs(position)
+                            and edge * o.qty > pol.dump_cost * need):
+                        continue
+                    trade = -need if position > 0 else need
+                    fill = mid + pol.dump_cost if trade > 0 else mid - pol.dump_cost
+                    cad -= trade * fill * rate
+                    position += trade
+                    if not fits(position, signed, basket, pol):
+                        continue
             cad -= signed * o.price * rate
             position += signed
             taken[o.tid] = t
@@ -251,6 +299,8 @@ def simulate(heat, pol, flicker=frozenset(), forced=None):
             glide_tick, glide_from = t, position - stranded
 
     cad += position * heat.close_mid * heat.usd_close   # close-out: exact, free, no impact
+    if basket and nav:
+        cad += basket * nav                                 # BULL + BEAR close out too
     return cad, taken
 
 
