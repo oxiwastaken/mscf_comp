@@ -269,49 +269,17 @@ def build_chain(securities, tick, ticks_total, week_vols, mode=None):
         if not forecast or t_years <= 0:
             continue
 
-        # VALUE is judged at our forecast. RISK is measured at the market's
-        # implied vol, because that is what the CRO's delta limit is computed
-        # against, and the limit is the thing that fines us.
-        #
-        # These are not the same number and the difference is not small. Heat
-        # 22:40, ticks 188-205: our greeks put the book at +530 to +7,319 delta
-        # - comfortably inside the band, so the trader sent no hedge - while
-        # the same book at market IV was +23,157 to +35,222, and the server's
-        # own figure (recovered by inverting the fine) tracked the market-IV
-        # number almost exactly. Median gap 19,621 delta. Of that heat's
-        # $46,379 fine, $39,870 was charged while the trader believed it was
-        # flat and did nothing.
-        #
-        # The divergence is worst exactly when we are most invested: it scales
-        # with how far our forecast sits from the market's, and a disagreement
-        # is the whole reason a position exists.
-        # Falling back to the forecast when the market gives us nothing to
-        # price with is deliberate: an approximate delta still hedges, and no
-        # delta at all leaves the book blind exactly when quotes degenerate
-        # near expiry - which is where the gamma is.
-        hedge_vol = row['market_iv'] or market_avg_iv or forecast
         try:
-            row['fair'] = black_scholes(row['flag'], spot, row['strike'],
-                                        t_years, config.RISK_FREE_RATE,
-                                        forecast)
-        except Exception:
-            pass
-        if not hedge_vol:
-            continue
-        try:
+            fair = black_scholes(row['flag'], spot, row['strike'], t_years,
+                                 config.RISK_FREE_RATE, forecast)
+            row['fair'] = fair
             row['delta'] = analytical.delta(row['flag'], spot, row['strike'],
-                                            t_years, config.RISK_FREE_RATE,
-                                            hedge_vol)
+                                            t_years, config.RISK_FREE_RATE, forecast)
             row['gamma'] = analytical.gamma(row['flag'], spot, row['strike'],
-                                            t_years, config.RISK_FREE_RATE,
-                                            hedge_vol)
+                                            t_years, config.RISK_FREE_RATE, forecast)
             row['vega'] = analytical.vega(row['flag'], spot, row['strike'],
-                                          t_years, config.RISK_FREE_RATE,
-                                          hedge_vol)
+                                          t_years, config.RISK_FREE_RATE, forecast)
         except Exception:
-            continue
-        fair = row['fair']
-        if fair is None:
             continue
 
         if row['market_iv']:
