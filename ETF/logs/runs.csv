@@ -13,3 +13,6 @@ run_id,ts,risk_model,risk_model_desc,arb_threshold_cad,order_qty,max_long_net,ma
 20260918-213909,2026-09-18T21:39:09.657,v6_depthgate,"v5 + tender edge priced at chunk VWAP, not top-of-book",0.07,5000,25000,-25000,250000,0.5
 20260918-214346,2026-09-18T21:43:46.275,v7_edgecal,"v6 + tender bar recalibrated for honest pricing, float-safe",0.07,5000,25000,-25000,250000,0.5
 20260918-220310,2026-09-18T22:03:10.365,v7_edgecal,"v6 + tender bar recalibrated for honest pricing, float-safe",0.07,5000,25000,-25000,250000,0.5
+20260918-221050,2026-09-18T22:10:50.201,v8_capacity,v7 + 3 unwind chunks/cycle and 0.05 tender bar; capacity is the constraint,0.07,5000,25000,-25000,250000,0.5
+20260918-221720,2026-09-18T22:17:20.010,v9_slipgated,v8 + unwind stops chunking when realised slippage exceeds 0.05,0.07,5000,25000,-25000,250000,0.5
+20260918-223107,2026-09-18T22:31:07.499,v10_revert,back to v7 unwind rate and bar; per-tender realised P&L now logged,0.07,5000,25000,-25000,250000,0.5

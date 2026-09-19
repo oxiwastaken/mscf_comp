@@ -139,6 +139,90 @@ Measured basis gap across v6's tenders: mean 0.0172/unit, max 0.0700, and
 exactly 0.000 whenever the touch holds a full chunk — so it bites only on thin
 books, which is the intended behaviour.
 
+## `v8_capacity` — unwind 3x faster, tender bar to 0.05
+
+The binding constraint moved. Under v7 the gate stopped rejecting tenders on
+edge and started rejecting them on position limits: six tenders across three
+heats were refused with "net would hit", including +0.2350 on 97,000 units
+(~22,795 USD) and +0.1700 on 87,000 (~14,790 USD). Total ~78,000 USD, about
+26,000 USD/heat, every one of them because an earlier tender was still
+unwinding when the next arrived.
+
+The v5 instrumentation finally had enough data to settle the trade-off: 97
+unwind chunks at +0.0133/unit mean (+0.0042 median), 12,093 USD total cost.
+Unwinding costs 0.0133/unit; being blocked costs 0.09-0.235/unit. Clearing the
+book faster wins by roughly 10x even if slippage worsens from taking more
+depth per cycle.
+
+`UNWIND_CHUNKS_PER_CYCLE = 3` sends up to three orders per cycle instead of
+one, decrementing its view of available depth between them since the book is
+only fetched once per cycle. That clears an ~87,000 unit tender in ~3 cycles
+rather than ~11.
+
+`MIN_TENDER_EDGE` lowered 0.08 -> 0.05. With the unwind now measured at
+0.0133/unit, break-even is ~0.033 after the 0.02 fee, so 0.08 was refusing
+profitable tenders: three in three heats at +0.060 to +0.077, worth ~18,800 USD.
+
+Two changes at once, which muddies attribution. They are independent levers
+(capacity vs threshold) and both are grounded in the same measurement, so the
+cost of waiting a version to separate them was higher than the ambiguity.
+
+## `v9_slipgated` — unwind backs off on realised slippage
+
+v8's three-chunks-per-cycle was too blunt. The RITC book refills *between*
+cycles, not within one, so three back-to-back orders simply walk it. Measured
+on a single cycle: +0.0316, then +0.1100, then +0.1397 — a 4x escalation,
+~0.083/unit against the 0.0133 that one chunk per cycle had been costing.
+
+At ~90,000 units per tender that is ~6,300 USD of extra unwind cost to recover
+~26,000 USD/heat of blocking. Still positive, but a far thinner margin than the
+"10x" the single-chunk measurement implied, because that measurement did not
+extrapolate to chunks taken back to back.
+
+Rather than guess a fixed chunk count, the loop now reads the realised fill and
+stops for the cycle once slippage exceeds `MAX_UNWIND_SLIP = 0.05` — between the
+0.0133 one-chunk baseline and the 0.09+ cost of being blocked. Deep book, it
+keeps the v8 speed; thin book, it backs off to v7 behaviour. The remainder
+carries to the next cycle, by which time the book has refilled.
+
+## `v10_revert` — back to v7 settings; the v8/v9 measurement was wrong
+
+v8 and v9 were a regression and both rested on a broken measurement.
+
+Realised economics, tender price against the VWAP of the entire unwind:
+
+| version | chunks/cycle | bar  | gate edge | realised | given back |
+|---------|--------------|------|-----------|----------|------------|
+| v7      | 1            | 0.08 | +0.1420   | +0.2354  | -0.0933    |
+| v8      | 3            | 0.05 | +0.1067   | +0.0815  | +0.0251    |
+| v9      | 3 (gated)    | 0.05 | +0.1265   | +0.0548  | +0.0717    |
+
+v7 realised *more* than its gate predicted. v9 hands back 0.0717/unit — a
+0.165/unit swing, roughly 74,000 USD/heat at ~5 tenders of ~90,000 units. v9
+heat 2 accepted five tenders with gate edges of +0.168, +0.145 and +0.140 and
+still lost 21,421, because the unwind gave back everything it captured.
+
+The cause was concentration. Three chunks per cycle pushes ~30,000 units into a
+book holding ~5-10k at the touch, and the fills walk it: 25.194 → 25.235 →
+25.260 → ... → 25.332 while buying back 92,000 units. The book refills *between*
+cycles, so one chunk per cycle lets the price recover instead of chasing it.
+
+The measurement that hid this was `MAX_UNWIND_SLIP` / the per-chunk slippage
+column. It compares each fill against top-of-book *at that instant*, so when our
+own unwind drags the quote between cycles it sees nothing. It read +0.0123/unit
+while the true cost was ~0.14/unit of self-inflicted drift. That figure is what
+justified dropping the bar to 0.05, so one bad metric produced two bad changes.
+The v9 slip gate was blind for the same reason — it was gating on the metric
+that could not see the problem.
+
+`UNWIND_CHUNKS_PER_CYCLE` back to 1 and `MIN_TENDER_EDGE` back to 0.08.
+Per-chunk slippage is kept only as a safety stop, explicitly not as a cost
+measure. `analyze_tenders.py` now scores the real thing — tender price against
+the full unwind VWAP — and writes `logs/tender_pnl.csv`.
+
+Lesson worth keeping: a metric that only sees one instant cannot price an
+action whose cost accrues across many.
+
 ---
 
 ## Known open items

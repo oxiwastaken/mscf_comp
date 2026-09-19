@@ -170,7 +170,12 @@ LIMIT_BUFFER = 3000
 # The edge swings across a tender's ~5-tick life, so the gate is re-evaluated
 # each cycle and fires on a good one rather than the first one.
 #
-# Lowered from 0.10 when v6 started pricing the unwind at chunk VWAP. That
+# RESTORED to 0.08 in v10. The 0.05 of v8/v9 was justified by a per-chunk
+# slippage figure of +0.0133/unit that turned out to measure the wrong thing
+# (see MAX_UNWIND_SLIP), so the break-even it implied was far too optimistic.
+# 0.08 is the bar v7 ran at while realising +0.235/unit.
+#
+# Originally lowered from 0.10 when v6 started pricing the unwind at chunk VWAP. That
 # removed ~0.017/unit of phantom edge from the measurement, so an unchanged
 # 0.10 would have been materially stricter than the 0.10 that produced heat 2's
 # profitable 75% capture rate - a silent second tightening. 0.08 keeps the
@@ -180,6 +185,32 @@ MIN_TENDER_EDGE = 0.08
 # 0.09999999 printed as "+0.1000 < 0.1" and declined an 84,000-unit tender
 # worth ~8,400 USD over a rounding artefact.
 EDGE_EPSILON = 1e-6
+# Chunks per cycle. Capacity, not slippage, is the binding constraint: six
+# tenders worth ~78,000 USD across three heats were refused on "net would hit"
+# because an earlier tender was still unwinding when they arrived (~26,000
+# USD/heat). Measured unwind slippage is +0.0133/unit against blocked edges of
+# +0.09 to +0.235, so clearing the book faster wins by roughly 10x even if
+# slippage worsens. The server allows 50 orders/sec, so 3 is well inside limits.
+# REVERTED to 1 in v10. Three chunks per cycle concentrated the unwind and
+# moved the market against us: realised edge per unit fell from +0.235 (v7, one
+# chunk) to +0.082 (v8) to +0.031 (v9), turning several genuinely good tenders
+# into losses. The book refills between cycles, so one chunk per cycle lets the
+# price recover instead of chasing it.
+UNWIND_CHUNKS_PER_CYCLE = 1
+# Retained as a safety stop, but do NOT trust it as a cost measure. It compares
+# each fill against top-of-book AT THAT INSTANT, so it cannot see our own
+# unwind dragging the quote between cycles - it read +0.0123/unit while the
+# true cost of a 92,000 unit unwind was ~0.14/unit of self-inflicted drift.
+# Realised cost is measured properly in tender_pnl.csv: tender price against the
+# VWAP of the entire unwind.
+#
+# Stop chunking this cycle once a fill comes back worse than this. The book
+# refills BETWEEN cycles, not within one, so back-to-back orders just walk it:
+# measured 3-chunk cycles ran +0.0316 / +0.1100 / +0.1397, a 4x escalation, for
+# ~0.083/unit against 0.0133 at one chunk. Reacting to the realised fill keeps
+# the speed when the book is deep and backs off when it is thin, instead of
+# picking a fixed chunk count that is wrong in one direction or the other.
+MAX_UNWIND_SLIP = 0.05
 # Work an oversized RITC position back toward flat at this rate per cycle.
 UNWIND_CHUNK = 10000
 # Book levels counted when sizing an unwind chunk.
@@ -208,8 +239,8 @@ ARB_THRESHOLD_CAD = 0.07
 #             cycle; tender accept fixed (see VERSIONS.md).
 #   v5_depthunwind - current. Unwind chunks sized to visible book depth and
 #             every unwind fill logged, to measure what the unwind costs.
-RISK_MODEL = "v7_edgecal"
-RISK_MODEL_DESC = "v6 + tender bar recalibrated for honest pricing, float-safe"
+RISK_MODEL = "v10_revert"
+RISK_MODEL_DESC = "back to v7 unwind rate and bar; per-tender realised P&L now logged"
 
 LOOP_SLEEP = 0.5    # between cycles inside a heat (~8 requests per cycle)
 WAIT_POLL = 2.0     # between polls while waiting for the next heat
@@ -440,23 +471,39 @@ def unwind_ritc(session, pos, book, snap, logs, heat, tick):
     if abs(ritc) <= UNWIND_THRESHOLD:
         return None, 0
     action = "SELL" if ritc > 0 else "BUY"
-
-    # Take at most half of what is visible in the top few levels, so the chunk
-    # scales down when the book is thin instead of walking it every cycle.
     avail = depth_within(book, "bid" if action == "SELL" else "ask")
-    room = abs(ritc) - UNWIND_THRESHOLD
-    qty = int(min(room, UNWIND_CHUNK, MAX_SIZE_EQUITY, max(avail * DEPTH_FRACTION, 1000)))
-    if qty <= 0:
-        return None, 0
-
     ref_bid, ref_ask = top_of_book(book)
     ref = ref_bid if action == "SELL" else ref_ask
-    try:
-        resp = place_mkt(session, RITC, action, qty)
-    except ApiException as e:
-        print(f"  unwind failed: {e}")
-        return None, 0
 
+    remaining = abs(ritc) - UNWIND_THRESHOLD
+    sent = 0
+    for _ in range(UNWIND_CHUNKS_PER_CYCLE):
+        if remaining <= 0:
+            break
+        # Take at most half of what is visible, so the chunk scales down on a
+        # thin book. `avail` is decremented as we go: the book is only fetched
+        # once per cycle, so later chunks must not re-spend the same depth.
+        qty = int(min(remaining, UNWIND_CHUNK, MAX_SIZE_EQUITY,
+                      max(avail * DEPTH_FRACTION, 1000)))
+        if qty <= 0:
+            break
+        try:
+            resp = place_mkt(session, RITC, action, qty)
+        except ApiException as e:
+            print(f"  unwind failed: {e}")
+            break
+        slip = _log_unwind(logs, heat, tick, action, qty, resp, ref, snap, ritc, avail)
+        remaining -= qty
+        avail = max(avail - qty, 0)
+        sent += qty
+        if slip is not None and slip > MAX_UNWIND_SLIP:
+            print(f"    slip {slip:+.4f} > {MAX_UNWIND_SLIP} - holding the rest for next cycle")
+            break
+
+    return (action, sent) if sent else (None, 0)
+
+
+def _log_unwind(logs, heat, tick, action, qty, resp, ref, snap, ritc, avail):
     row = {
         "run_id": RUN_ID, "risk_model": RISK_MODEL, "heat": heat, "tick": tick,
         "ts": now_iso(), "direction": "unwind", "edge_at_decision": "",
@@ -474,9 +521,9 @@ def unwind_ritc(session, pos, book, snap, logs, heat, tick):
             slip = (ref - resp["vwap"]) if action == "SELL" else (resp["vwap"] - ref)
     row.update(snap)
     logs.trades.write(row)
-    print(f"  UNWIND {action} {qty} RITC (pos {ritc:+,}, depth {avail:,.0f}"
+    print(f"  UNWIND {action} {qty:,} RITC (pos {ritc:+,}, depth {avail:,.0f}"
           f"{'' if slip is None else f', slip {slip:+.4f}'})")
-    return action, qty
+    return slip
 
 
 def risk_metrics(pos):
