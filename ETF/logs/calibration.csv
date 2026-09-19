@@ -337,3 +337,5 @@ run_id,risk_model,heat,ts,direction,n_total,slip,slip_src,margin,action,base
 20260919-024524,v26_mmoff,49,2026-09-19T07:39:08.980,etf_rich,436,0.07,"fit on 60 arbs: 53 survive, net +0.0253",0.0,narrow (last heat +0.0596/unit over 5),0.07
 20260919-024524,v26_mmoff,50,2026-09-19T07:45:15.307,basket_rich,203,0.16,"fit on 60 arbs: 28 survive, net +0.0213 | step 0.150->0.160 (want 0.160)",0.0,hold (only 1 arbs last heat),0.16
 20260919-024524,v26_mmoff,50,2026-09-19T07:45:15.307,etf_rich,438,0.02,"fit on 60 arbs: 60 survive, net +0.0218 | step 0.070->0.060 (want 0.020)",0.0,hold (only 2 arbs last heat),0.06
+20260919-024524,v26_mmoff,51,2026-09-19T07:51:21.559,basket_rich,204,0.18,"fit on 60 arbs: 25 survive, net +0.0205 | step 0.160->0.170 (want 0.180)",0.0,hold (only 1 arbs last heat),0.17
+20260919-024524,v26_mmoff,51,2026-09-19T07:51:21.559,etf_rich,444,0.02,"fit on 60 arbs: 60 survive, net +0.0209 | step 0.060->0.050 (want 0.020)",0.0,narrow (last heat +0.0101/unit over 6),0.05
