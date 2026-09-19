@@ -206,6 +206,24 @@ LIMIT_BUFFER = 3000
 # profitable 75% capture rate - a silent second tightening. 0.08 keeps the
 # effective bar where the evidence says it worked.
 MIN_TENDER_EDGE = 0.08
+# Bar for a tender that will be HELD to close-out rather than unwound, priced
+# against the mid with no fee (see HOLD_TO_CLOSEOUT_TICK).
+#
+# The two bars are not comparable, because they sit on different measurements.
+# `MIN_TENDER_EDGE` is measured after subtracting a market unwind; this one is
+# not, and across 385 logged tenders that difference is worth +0.0626/unit on
+# average (median +0.0550, p10 +0.0250). So 0.04 here is a materially STRICTER
+# requirement than 0.08 there, not a looser one.
+#
+# 0.04 because the risk on a held tender is not execution - there is none - but
+# that close-out lands on the wrong side of the book rather than at the mid.
+# One half-spread covers that, and the median RITC spread is 0.08. Drift to the
+# close is mean-zero (-0.0126/unit against a 0.0779 sd), so it needs no cushion.
+#
+# Worth 11 tenders and ~3,017 USD/heat across the logged history: tenders like
+# +0.0086 on 93,000 units that the unwind-priced bar refused, which are
+# +0.0836 once the exit is close-out.
+MIN_TENDER_EDGE_HELD = 0.04
 # Guards the threshold comparison against float noise. Without it an edge of
 # 0.09999999 printed as "+0.1000 < 0.1" and declined an 84,000-unit tender
 # worth ~8,400 USD over a rounding artefact.
@@ -391,8 +409,11 @@ ARB_THRESHOLD_CAD = 0.07
 #   v14_holdout - tender inventory taken late in the heat is held for
 #             close-out rather than unwound, because close-out is free against
 #             the mid and the capacity it buys is worth almost nothing by then.
-RISK_MODEL = "v14_holdout"
-RISK_MODEL_DESC = "v13 plus: stop unwinding late in the heat, let close-out price it"
+#   v15_exitbasis - the tender gate prices the exit the tender will actually
+#             take: close-out at the mid past the hold threshold, a market
+#             unwind before it.
+RISK_MODEL = "v15_exitbasis"
+RISK_MODEL_DESC = "v14 plus: gate a held tender against close-out, not a unwind that never runs"
 
 LOOP_SLEEP = 0.5    # between cycles inside a heat (~8 requests per cycle)
 WAIT_POLL = 2.0     # between polls while waiting for the next heat
@@ -998,7 +1019,7 @@ def risk_metrics(pos):
 # TENDERS
 # ============================================================================
 
-def tender_safety(offer, pos, book, usd_bid, usd_ask):
+def tender_safety(offer, pos, book, usd_bid, usd_ask, tick=0):
     """Minimum bar before accepting a tender: beats the market we must unwind
     into, and fits inside the server's position limits.
 
@@ -1024,21 +1045,41 @@ def tender_safety(offer, pos, book, usd_bid, usd_ask):
     # between them, so a single sweep never happens. Chunk VWAP is what each
     # order actually experiences, and it matches the ~18% leak measured on the
     # first captured tenders.
-    if action == "SELL":          # we sell to them, buy back through the asks
-        ref, _ = vwap_for_qty(book.get("asks") or [], UNWIND_CHUNK)
-        edge = (price - ref) if ref else None
-    elif action == "BUY":         # we buy from them, sell out through the bids
-        ref, _ = vwap_for_qty(book.get("bids") or [], UNWIND_CHUNK)
-        edge = (ref - price) if ref else None
-    else:
+    if action not in ("SELL", "BUY"):
         return False, f"unknown action {action}", None
-    if edge is None:
-        return False, "no book depth", None
 
-    # Unwind pays the market fee per unit; tender itself is fee-free.
-    edge -= FEE_MKT
-    if edge < MIN_TENDER_EDGE - EDGE_EPSILON:
-        return False, f"edge {edge:+.5f} < {MIN_TENDER_EDGE}", edge
+    # Which exit this tender is actually going to take. Past
+    # HOLD_TO_CLOSEOUT_TICK the unwind does not run (see v14), so pricing the
+    # tender against a market unwind values an exit that will never happen -
+    # and values it ~0.063/unit too low, measured across 385 logged tenders.
+    if tick >= HOLD_TO_CLOSEOUT_TICK:
+        bid, ask = top_of_book(book)
+        if bid <= 0 or ask >= 1e12:
+            return False, "no book depth", None
+        # Close-out is at the last traded price, charges no commission and has
+        # no impact, so the mid is the honest reference and no fee comes off.
+        mid = (bid + ask) / 2.0
+        edge = (price - mid) if action == "SELL" else (mid - price)
+        # A wider bar than the unwind case despite the cheaper exit. The risk
+        # here is not execution, it is that close-out lands on the wrong side
+        # of the book rather than at the mid; one half-spread (median RITC
+        # spread 0.08) covers that, and drift to the close is mean-zero.
+        bar, basis = MIN_TENDER_EDGE_HELD, "closeout"
+    else:
+        if action == "SELL":      # we sell to them, buy back through the asks
+            ref, _ = vwap_for_qty(book.get("asks") or [], UNWIND_CHUNK)
+            edge = (price - ref) if ref else None
+        else:                     # we buy from them, sell out through the bids
+            ref, _ = vwap_for_qty(book.get("bids") or [], UNWIND_CHUNK)
+            edge = (ref - price) if ref else None
+        if edge is None:
+            return False, "no book depth", None
+        # Unwind pays the market fee per unit; tender itself is fee-free.
+        edge -= FEE_MKT
+        bar, basis = MIN_TENDER_EDGE, "unwind"
+
+    if edge < bar - EDGE_EPSILON:
+        return False, f"edge {edge:+.5f} < {bar} ({basis})", edge
 
     # Projected exposure in underlying units (ETF counts double).
     signed = -qty if action == "SELL" else qty
@@ -1187,7 +1228,7 @@ def handle_tenders(session, logs, heat, tick, snap, quotes, pos, books):
         mkt_bid, mkt_ask = quotes.get(ticker, (None, None))
         book = books.get(ticker, {"bids": [], "asks": []})
         safe, reason, edge = tender_safety(
-            offer, pos, book, snap["usd_bid"], snap["usd_ask"])
+            offer, pos, book, snap["usd_bid"], snap["usd_ask"], tick)
         # Only the net check is worth buying our way past. A gross breach means
         # the book is genuinely full; a net breach on a tender this size is
         # usually just the x2 multiplier, and a few thousand shares of basket
@@ -1197,7 +1238,7 @@ def handle_tenders(session, logs, heat, tick, snap, quotes, pos, books):
             hedged = prehedge_for_tender(session, offer, pos, logs, heat, tick, snap)
             if hedged:
                 safe, reason, edge = tender_safety(
-                    offer, pos, book, snap["usd_bid"], snap["usd_ask"])
+                    offer, pos, book, snap["usd_bid"], snap["usd_ask"], tick)
                 reason = f"{reason} after prehedge {hedged:,}"
         side = "asks" if (offer.get('action') or '').upper() == "SELL" else "bids"
         chunk_ref, _ = vwap_for_qty(book.get(side) or [], UNWIND_CHUNK)

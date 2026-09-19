@@ -487,6 +487,64 @@ existing `tender_safety` projection handles that without a special case.
 the position is untouched with no fills and nothing resting, and thirty ticks
 before it the unwind still runs to flat.
 
+## `v15_exitbasis` — price the exit the tender is actually going to take
+
+v14 stopped unwinding after tick 200 but left the gate pricing every tender
+against a market unwind. Past the threshold that unwind never happens, so the
+gate was valuing an exit that does not exist — and valuing it too low.
+
+The gate's edge is `price − chunk_vwap − FEE_MKT`. A held tender's exit is
+close-out at the last traded price: no commission, no impact, so the honest
+reference is the mid and nothing comes off for fees. The difference, measured
+on 385 logged tender books rather than assumed:
+
+| uplift from close-out basis | value   |
+|-----------------------------|---------|
+| mean                        | +0.0626 |
+| median                      | +0.0550 |
+| p10                         | +0.0250 |
+| p90                         | +0.1030 |
+
+(An earlier pass through this used a flat +0.0750 taken from the pooled
+execution figure. Deriving it per-tender from the logged `chunk_vwap` instead
+put it 20% lower. The smaller number is the one used.)
+
+**The two bars are not comparable, and that is the point.** `MIN_TENDER_EDGE =
+0.08` is measured *after* subtracting a market unwind. `MIN_TENDER_EDGE_HELD =
+0.04` is not. Put on the same footing, 0.04 on the close-out basis is a
+materially **stricter** requirement than 0.08 on the unwind basis, not a looser
+one.
+
+0.04 because the risk on a held tender is not execution — there is none — but
+that close-out lands on the wrong side of the book rather than at the mid. One
+half-spread covers that, and the median RITC spread is 0.08. Drift to the close
+needs no cushion: it is mean-zero (−0.0126/unit against a 0.0779 sd).
+
+**Worth ~3,000 USD/heat** on the conservative count (11 tenders that carry a
+full logged book, scored at the logged `chunk_vwap`). Driving the real gate
+over every logged book puts it higher — 36 distinct tenders, 333,780 USD — but
+that count uses a synthetic book thinner than the real one at the touch, which
+makes the unwind basis look worse and the uplift larger, so it is an upper
+bound. The change is justified on the ~3,000.
+
+Typical of what it unlocks: +0.0086 on 93,000 units, refused by the
+unwind-priced bar, worth +0.0836 once the exit is close-out.
+
+### Tooling
+
+`test_hold_gate.py` drives the real `tender_safety` over 1,144 logged tender
+books and asserts the basis switches at the threshold and not before; that
+close-out is never worse than the unwind on the same book (0 of 1,144 go the
+wrong way — if any did, the whole argument is backwards); that the logged
+uplift is the figure the change was justified on; that the synthetic book errs
+in the conservative direction; and that all 47 money-losing late tenders are
+still refused.
+
+It also caught two of its own errors first: an assertion that every gate
+rejection carries a basis tag, when a limit rejection legitimately carries
+neither, and a headline count that was counting log rows rather than distinct
+tenders — each tender is logged once per cycle of its ~6-cycle life.
+
 ---
 
 ## Known open items
