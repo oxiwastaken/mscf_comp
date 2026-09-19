@@ -155,3 +155,15 @@ run_id,risk_model,heat,ts,direction,n_total,slip,slip_src,margin,action,base
 20260918-223107,v10_revert,4,2026-09-18T22:44:47.316,etf_rich,252,0.02,"fit on 60 arbs: 60 survive, net +0.0317",0.02,hold (only 0 arbs last heat),0.04
 20260918-224834,v11_hedgesafe,1,2026-09-18T22:48:34.338,basket_rich,159,0.05,"fit on 60 arbs: 37 survive, net +0.0271 | step 0.150->0.140 (want 0.050)",0.0,narrow (last heat +0.1867/unit over 5),0.14
 20260918-224834,v11_hedgesafe,1,2026-09-18T22:48:34.338,etf_rich,253,0.02,"fit on 60 arbs: 60 survive, net +0.0331 | step 0.040->0.030 (want 0.030)",0.01,hold (only 1 arbs last heat),0.03
+20260918-231227,v14_holdout,1,2026-09-18T23:12:27.808,basket_rich,159,0.05,"fit on 60 arbs: 37 survive, net +0.0271",0.0,narrow (last heat +0.1867/unit over 5),0.05
+20260918-231227,v14_holdout,1,2026-09-18T23:12:27.808,etf_rich,253,0.02,"fit on 60 arbs: 60 survive, net +0.0331",0.01,hold (only 1 arbs last heat),0.03
+20260918-231227,v14_holdout,2,2026-09-18T23:15:43.586,basket_rich,161,0.05,"fit on 60 arbs: 38 survive, net +0.0234",0.0,hold (only 2 arbs last heat),0.05
+20260918-231227,v14_holdout,2,2026-09-18T23:15:43.587,etf_rich,257,0.02,"fit on 60 arbs: 60 survive, net +0.0293 | step 0.030->0.040 (want 0.040)",0.02,widen (last heat -0.0254/unit over 4),0.04
+20260918-231227,v14_holdout,3,2026-09-18T23:21:54.144,basket_rich,162,0.06,"fit on 60 arbs: 33 survive, net +0.0302",0.0,hold (only 1 arbs last heat),0.06
+20260918-231227,v14_holdout,3,2026-09-18T23:21:54.144,etf_rich,263,0.05,"fit on 60 arbs: 51 survive, net +0.0208 | step 0.040->0.050 (want 0.060)",0.01,narrow (last heat +0.0176/unit over 6),0.05
+20260918-231227,v14_holdout,4,2026-09-18T23:28:40.010,basket_rich,168,0.05,"fit on 60 arbs: 42 survive, net +0.0229",0.0,narrow (last heat +0.0495/unit over 6),0.05
+20260918-231227,v14_holdout,4,2026-09-18T23:28:40.013,etf_rich,263,0.05,"fit on 60 arbs: 51 survive, net +0.0208 | step 0.050->0.060 (want 0.060)",0.01,hold (only 0 arbs last heat),0.06
+20260918-233247,v17_holdtick,1,2026-09-18T23:32:47.201,basket_rich,170,0.06,"fit on 60 arbs: 39 survive, net +0.0297 | step 0.050->0.060 (want 0.070)",0.01,hold (only 2 arbs last heat),0.06
+20260918-233247,v17_holdtick,1,2026-09-18T23:32:47.201,etf_rich,263,0.05,"fit on 60 arbs: 51 survive, net +0.0208",0.01,hold (only 0 arbs last heat),0.06
+20260918-233247,v17_holdtick,2,2026-09-18T23:34:15.014,basket_rich,170,0.06,"fit on 60 arbs: 39 survive, net +0.0297",0.01,hold (only 2 arbs last heat),0.07
+20260918-233247,v17_holdtick,2,2026-09-18T23:34:15.015,etf_rich,263,0.05,"fit on 60 arbs: 51 survive, net +0.0208",0.01,hold (only 0 arbs last heat),0.06

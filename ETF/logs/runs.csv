@@ -17,3 +17,5 @@ run_id,ts,risk_model,risk_model_desc,arb_threshold_cad,order_qty,max_long_net,ma
 20260918-221720,2026-09-18T22:17:20.010,v9_slipgated,v8 + unwind stops chunking when realised slippage exceeds 0.05,0.07,5000,25000,-25000,250000,0.5
 20260918-223107,2026-09-18T22:31:07.499,v10_revert,back to v7 unwind rate and bar; per-tender realised P&L now logged,0.07,5000,25000,-25000,250000,0.5
 20260918-224834,2026-09-18T22:48:34.225,v11_hedgesafe,"unwind targets tender inventory only, never the arb hedge leg",0.07,5000,25000,-25000,250000,0.5
+20260918-231227,2026-09-18T23:12:27.694,v14_holdout,"v13 plus: stop unwinding late in the heat, let close-out price it",0.07,5000,25000,-25000,250000,0.5
+20260918-233247,2026-09-18T23:32:47.047,v17_holdtick,"v16 plus: hold threshold 175, picked for robustness not the peak",0.07,5000,25000,-25000,250000,0.5

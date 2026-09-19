@@ -694,6 +694,46 @@ later mistakes its absence for an oversight.
 
 ---
 
+## `v18_livepassive` — first live results for v12-v17, and what they say
+
+v12-v17 were built without credentials and were predictions. Four v14 heats and
+one v17 heat have now run live. Answering the checklist in order:
+
+| check | predicted | live | verdict |
+|-------|-----------|------|---------|
+| passive fills happen | > 0 | 0.70 / 0.63 / 0.46 | yes |
+| passive share | 0.12-0.15 | **~0.60** | 4x under-predicted |
+| rebate is real | 0.03 x passive units | see below | **not testable as written** |
+| hold fires | once after tick 200 | never | not yet seen |
+| pre-hedge reaches something | non-zero on >=98,500 | never | not yet seen |
+| tracker stays honest | no unwind at small pos_ritc | holds | v16 works |
+
+**Passive share is ~60%, not 12-15%.** The checklist's own prescription for
+"much higher" is to raise `PASSIVE_MAX_LIVE`, and it is one of the two
+parameters explicitly flagged as not sized by evidence, to be tuned against a
+real heat rather than `sim_unwind.py`. Raised 1 -> 2: at a 60% fill rate the
+single resting order is the binding constraint, not the fill probability. Two
+lets a second chunk rest while the first works, without collapsing into the
+aggressive chunker. All four suites still pass.
+
+**The `fee_saved` check cannot fail.** It is computed as `0.03 x passive units`
+and then compared against `0.03 x passive units`, so the ratio came back exactly
+1.00 on all three heats. That is the formula agreeing with itself, not evidence
+the exchange paid the rebate. Confirming it needs realised cash against the
+passive fills, independent of the assumed rate. Leaving the column, but it
+should not be read as validation.
+
+**Heat 3's P&L is missing, not zero.** `nlv_start` and `nlv_end` both logged
+0.0 across 257 ticks with 5 accepts and 158,500 units unwound. The NLV read
+returned 0 at both ends - almost certainly sampled while the case was reset.
+Any mean over these heats should exclude it; it is the heat with the most
+tender activity, so including it biases the average down.
+
+Neither the hold nor the pre-hedge has fired yet, so `HOLD_TO_CLOSEOUT_TICK`,
+`MIN_TENDER_EDGE_HELD` and the pre-hedge path remain unvalidated live. The
+"close-out is benign" question - the one the checklist calls most important,
+because v14 and v15 both rest on it - is still open.
+
 ## Known open items
 
 - ~~`basket_rich` is negative (−0.0218/unit over 8 arbs)~~ — **RETRACTED.**

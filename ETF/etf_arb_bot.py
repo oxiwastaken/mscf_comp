@@ -315,7 +315,14 @@ PRICE_TICK = 0.01
 UNWIND_DEADLINE_CYCLES = 8
 # Passive orders resting at once. One order at the touch is what earns the
 # rebate; stacking more of them just shows the market our full size.
-PASSIVE_MAX_LIVE = 1
+# Raised 1 -> 2 on live evidence. VERSIONS.md predicted a 12-15% passive fill
+# share and flagged this as one of only two parameters not sized by evidence,
+# with the instruction to tune it against a real heat rather than the simulator.
+# Four live v14 heats came in at 70%, 63% and 46% (heat 1 took no tenders), so
+# one resting order is the binding constraint, not the fill rate. Two lets a
+# second chunk rest while the first is still working, without becoming the
+# aggressive chunker by another name.
+PASSIVE_MAX_LIVE = 2
 # Size of a single passive order. Larger than the market chunk because a
 # resting order does not move the price - it only fills if someone comes to it.
 PASSIVE_CHUNK = 10000
