@@ -969,6 +969,49 @@ HTTP round trip, against a one-second tick. `timing_from_log.py` was written to
 measure this from the trader's own timestamps and has NOT yet been run over a
 full heat. **That is the first thing to do.**
 
+### 1b. Big resizes take longer than a tick — CONFIRMED, 20:50
+
+`timing_from_log.py` over six live heats. Ticks are one second:
+
+| heat | trading ticks | orders | resizes >= 1s | longest |
+|---|---|---|---|---|
+| 204108 | 35 | 301 | 8 (23%) | 2s, 39 orders |
+| 203457 | 60 | 328 | 7 (12%) | 2s, 42 orders |
+| 202846 | 39 | 390 | 10 (26%) | 2s, 35 orders |
+| 202234 | 81 | 386 | 8 (10%) | 2s, 45 orders |
+| 201624 | 64 | 416 | 10 (16%) | 2s, 52 orders |
+
+**The largest resizes span two-plus seconds and 35-52 orders.** The later orders
+in such a resize fill against a market that has moved a tick or two, and the
+delta from the early fills sits partly unhedged across a tick boundary. That is
+the mechanism behind the backtest-to-live gap, and a backtest cannot see it
+because it moves the whole position at one price.
+
+It is the structure's doing: 2,500 gross contracts at the case's 100-contract
+order cap is 25 orders minimum, plus a hedge between each. The plain straddle
+is half that.
+
+**This is now the second independent argument for `WING_CONTRACTS = 375`**, the
+first being risk-adjusted P&L (`ship_or_not.py`):
+
+```
+                  mean       sd      worst   losers   vs straddle (live-adj)
+straddle only  $129,601  $60,584   +$5,498   0/133    -
+structure 750  $132,875  $74,082  -$40,716   4/133    +$2,243  (t 1.5)
+structure 375  $130,673  $61,856   +$2,536   0/133      +$734  (t 2.2)
+```
+
+750 buys a gain that is not statistically significant, costs $13.5k of extra
+standard deviation, introduces the only losing heats in the sample, and doubles
+the orders per resize. 375 is smaller, significant, variance-neutral and
+faster to execute.
+
+**NOT changed yet, deliberately.** The live runner is midway through a clean
+sample on 750 ($138,919 over 26 heats, no losers) and switching mid-run would
+fragment it. Change the one constant in `structure.py` when that sample is
+long enough, or if the competition is close enough that the tail matters more
+than the last $1,500.
+
 ### 2. The real delta penalty is half what the backtest charges
 
 The backtest charges one second of the whole pre-hedge delta at every resize -
