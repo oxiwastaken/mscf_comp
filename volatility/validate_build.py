@@ -12,19 +12,36 @@ This restricts the comparison to heats traded by one build, which is the only
 version of the question worth answering before a competition.
 """
 
+import csv
+import os
 import statistics
 import sys
 
 import sweep
 
 
+def finished_at():
+    """{tag: finish timestamp} - tags are clock times and wrap at midnight."""
+    out = {}
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           'results.csv'), encoding='utf-8') as handle:
+        for row in csv.DictReader(handle):
+            out[row['tag']] = row['finished']
+    return out
+
+
 def main():
-    since = sys.argv[1] if len(sys.argv) > 1 else '0'
+    # `since` is a FINISH TIMESTAMP, 'YYYY-MM-DD HH:MM', not a tag. Tags are
+    # wall-clock HHMMSS, so comparing them lexically silently drops every heat
+    # after midnight: '001003' < '230006' is true and the overnight run crosses
+    # midnight every time. That quietly excluded most of a night's data.
+    since = sys.argv[1] if len(sys.argv) > 1 else ''
+    when = finished_at()
     live = {tag: nlv for tag, nlv in sweep.live_results().items()
-            if tag >= since}
+            if when.get(tag, '') >= since}
     paths = [p for p in sweep.usable_heats() if sweep.tag_of(p) in live]
     if not paths:
-        print(f'  no recordings match live heats at or after {since}')
+        print(f'  no recordings match live heats finishing at or after {since!r}')
         return 1
 
     print(f'\n  {len(paths)} heats traded at or after tag {since}\n')

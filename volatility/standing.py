@@ -13,15 +13,46 @@ the ticks it noticed it was outside the band, so it undercounts badly.
 """
 
 import csv
-import glob
+import datetime
 import json
 import os
 import statistics
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GOAL = 150_000
 FINE_BUDGET = 10_000
+
+# The six modules the trader actually loads. A commit touching any of them
+# starts a new build, and heats either side of it are not the same experiment.
+LIVE_PATH = ('autotrader.py', 'structure.py', 'vol_engine.py',
+             'news_parser.py', 'config.py', 'rit_api.py')
+
+
+def builds():
+    """[(local datetime, short sha, subject)] for each live-path commit."""
+    try:
+        out = subprocess.check_output(
+            ('git', 'log', '--format=%h%x09%cI%x09%s', '--', *LIVE_PATH),
+            cwd=HERE, text=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        return []
+    rows = []
+    for line in out.splitlines():
+        sha, when, subject = line.split('\t', 2)
+        stamp = datetime.datetime.fromisoformat(when).astimezone()
+        rows.append((stamp.replace(tzinfo=None), sha, subject))
+    return rows
+
+
+def build_of(finished, history):
+    """Which build was trading when a heat finished."""
+    when = datetime.datetime.fromisoformat(finished)
+    for stamp, sha, subject in history:      # newest first
+        if when >= stamp:
+            return sha, subject
+    return '(pre-git)', ''
 
 
 def server_fine(tag):
@@ -98,6 +129,20 @@ def main():
         allnlv = [int(r['nlv']) for r in every]
         print(f'\n  all {len(allnlv)} heats on record: mean ${statistics.mean(allnlv):,.0f}   '
               f'median ${statistics.median(allnlv):,.0f}   worst ${min(allnlv):,.0f}')
+
+    # Per build. Heats either side of a live-path commit are different
+    # experiments and averaging across them measures neither.
+    history = builds()
+    if history:
+        groups = {}
+        for row in every:
+            sha, subject = build_of(row['finished'], history)
+            groups.setdefault((sha, subject), []).append(int(row['nlv']))
+        print('\n  by build (a live-path commit starts a new one):')
+        for (sha, subject), values in list(groups.items())[-6:]:
+            note = '' if len(values) >= 10 else '   (too few to read)'
+            print(f'    {sha:<10} n={len(values):<4} mean ${statistics.mean(values):>9,.0f}'
+                  f'   {subject[:52]}{note}')
     print()
     return 0
 
