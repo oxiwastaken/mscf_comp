@@ -472,7 +472,8 @@ def run(snapshots, policy, verbose=False, forecast_news=None,
         delta = vol_engine.portfolio_delta(
             rows, book.positions.get(config.UNDERLYING, 0))
         suggestion = vol_engine.hedge_suggestion(
-            delta, trigger=hedge_trigger, target=hedge_target)
+            delta, trigger=hedge_trigger, target=hedge_target,
+            urgent_target=config.HEDGE_URGENT_TARGET)
         if suggestion['action'] and suggestion['quantity'] > 0:
             signed = (suggestion['quantity'] if suggestion['action'] == 'BUY'
                       else -suggestion['quantity'])

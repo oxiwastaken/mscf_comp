@@ -1,0 +1,13 @@
+
+  160 recordings, policy ratchet+news
+
+  config                            mean    vs ref      t   penalty   friction   live-adj
+  shipped (buffer 2,000)     $   135,359        +0    0.0 $  14,336 $   46,907         +0
+  flatten fully when over    $   133,860    -1,499   -2.7 $  14,268 $   47,601     -1,536
+  to 1,000 when over         $   134,457      -902   -2.5 $  14,380 $   47,335       -878
+  to -2,000 (overshoot)      $   130,880    -4,479   -5.0 $  15,460 $   48,912     -3,855
+  trigger 4,000, flatten     $   134,185    -1,174   -2.1 $  13,801 $   47,724     -1,471
+  trigger 6,000, flatten     $   133,592    -1,767   -2.8 $  15,309 $   47,506     -1,227
+
+  live-adj discounts the penalty component to its real size.
+

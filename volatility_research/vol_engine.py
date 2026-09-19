@@ -349,7 +349,8 @@ def hedge_suggestion(delta,
                      trigger=config.HEDGE_TRIGGER_DELTA,
                      target=config.HEDGE_TARGET_DELTA,
                      limit=config.DELTA_LIMIT,
-                     rate=config.DELTA_PENALTY_RATE):
+                     rate=config.DELTA_PENALTY_RATE,
+                     urgent_target=None):
     """
     Suggest an RTM trade to pull delta back inside the band.
 
@@ -374,6 +375,18 @@ def hedge_suggestion(delta,
     }
     if magnitude <= trigger:
         return result
+
+    # Already outside the limit: hedge further in, not just back inside.
+    #
+    # The buffer exists so that ordinary drift does not drag a hedge after it
+    # at $0.02 a share. That reasoning does not survive a breach. Clearing an
+    # extra 2,000 of delta costs 2,000 * $0.02 = $40; carrying 2,000 past the
+    # limit costs 2,000 * $0.10 = $200 PER SECOND. If the residual buys even
+    # one extra second outside the band later, flattening paid for itself five
+    # times over - and the gamma on a full-size straddle near the money moves
+    # delta by more than that between one tick and the next.
+    if magnitude > limit and urgent_target is not None:
+        target = urgent_target
 
     quantity = int(round(magnitude - target))
     if quantity <= 0:

@@ -138,6 +138,11 @@ MAX_IV_SPREAD = 0.015          # vol points of noise implied by the quote width
 # paired t = 3.3 over 95 recordings), because it is mostly a fee saving.
 HEDGE_TRIGGER_DELTA = 5_000     # start suggesting a hedge past this
 HEDGE_TARGET_DELTA = 2_000      # hedge back to roughly this magnitude
+# Where to hedge back to when ALREADY outside the limit. None keeps the
+# ordinary buffer. See vol_engine.hedge_suggestion: past the limit the penalty
+# is $0.10 per delta per second against $0.02 a share to clear it, so the
+# buffer that protects against churn in normal conditions is a liability here.
+HEDGE_URGENT_TARGET = None
 
 # --------------------------------------------------------------- dashboard
 REFRESH_SECONDS = 0.35
