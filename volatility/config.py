@@ -127,8 +127,20 @@ MAX_IV_SPREAD = 0.015          # vol points of noise implied by the quote width
 # Only act when delta approaches the limit, then pull back to a safe interior
 # level. This avoids burning $0.02/share repeatedly flattening a delta that
 # drifts straight back.
+#
+# The TARGET was 2,000 and is 3,000. Delta inside +/-7,000 is free, so the only
+# thing the last 1,000 of flattening buys is a slightly later next hedge - and
+# it is paid for in shares every single time. Over 207 recordings, paired:
+# +$1,342 a heat (t 2.8), friction $48,170 -> $47,576, and the fine essentially
+# unmoved at $7,631 -> $7,795. Confirmed order-accurate over 80 heats at +$657
+# (t 2.7) with no illegal book, which matters here because this changes how
+# much of the 50,000-share limit the hedge is using.
+#
+# Broad interior plateau: 2,500 is +$1,032 (t 2.3), 3,500 +$1,152 (t 2.2), and
+# it falls away either side - 1,500 is -$976, 4,500 is +$611 at t 0.9 with the
+# fine climbing to $9,338. Past about 3,500 the extra room stops being free.
 HEDGE_TRIGGER_DELTA = 5_000     # start suggesting a hedge past this
-HEDGE_TARGET_DELTA = 2_000      # hedge back to roughly this magnitude
+HEDGE_TARGET_DELTA = 3_000      # hedge back to roughly this magnitude
 
 # --------------------------------------------------------------- dashboard
 REFRESH_SECONDS = 0.35
