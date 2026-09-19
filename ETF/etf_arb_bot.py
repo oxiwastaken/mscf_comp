@@ -86,6 +86,11 @@ shutdown = False
 # while BULL/BEAR ran to -20,000 each and NLV fell ~9,000 in ten ticks.
 tender_position = 0
 
+# Set by handle_tenders each cycle: a tender that cleared the edge bar was
+# refused on the position limits. Market making flattens only then (see
+# market_make), not merely because a tender is on offer.
+tender_limit_blocked = False
+
 # Basket put on purely to make net room for an oversized tender, signed, units
 # per side (BULL and BEAR carry the same amount). Tracked separately from the
 # arb's own BULL/BEAR for the same reason `tender_position` is tracked
@@ -483,6 +488,26 @@ PREHEDGE = True
 SWAP = True
 SWAP_DUMP_COST = 0.15
 SWAP_MARGIN = 1_000   # dump this much beyond the bare minimum, for rounding
+
+# Market making on RITC - a LIVE TEST, sized to be cheap to be wrong about.
+#
+# Whether passive quotes fill cannot be backtested: the logs carry no trade
+# prints, so fill rates are unknowable offline. This measures them. Quotes sit
+# one tick inside the touch (or at it, when the spread is one tick), leaning on
+# fair value = (BULL + BEAR) / USD: when RITC trades rich to it only the offer
+# is shown, when cheap only the bid, so we never buy what is overpriced.
+#
+# It stays out of the tenders' way completely - they are worth 10-50x more. It
+# quotes only while no tender inventory is held and no tender is on offer, and
+# flattens at market the moment one appears (at most ~9,000 units, ~500 USD).
+# A loss of MM_MAX_LOSS in a heat switches it off for the rest of that heat.
+MM_ENABLED = True
+MM_SIZE = 3_000
+MM_MAX_INV = 9_000
+MM_LEAN = 0.05            # USD premium/discount to fair value before leaning
+MM_START_TICK = 5
+MM_STOP_TICK = 285
+MM_MAX_LOSS = 5_000       # CAD
 # Cap per side. Sized to cover the whole observed shortfall (max 3,000 of net,
 # so 1,500 a side) with room to spare, while staying small enough that a hedge
 # left on by a failed accept is a rounding error rather than a position.
@@ -534,8 +559,8 @@ ARB_THRESHOLD_CAD = 0.07
 #   v21_grossreserve - the arb may only use gross that no tender needs. It was
 #             net-neutral and invisible to every net check while holding 224,000
 #             of gross and refusing 40,119 USD of tenders in one heat.
-RISK_MODEL = "v24_swap"
-RISK_MODEL_DESC = "v23 plus: dump inventory to take a blocked tender when its edge pays for it"
+RISK_MODEL = "v25_mmtest"
+RISK_MODEL_DESC = "v24 plus: live test of passive RITC market making while tenders are idle"
 
 LOOP_SLEEP = 0.5    # between cycles inside a heat (~8 requests per cycle)
 WAIT_POLL = 2.0     # between polls while waiting for the next heat
@@ -1398,6 +1423,136 @@ def unwind_prehedge(session, pos, logs, heat, tick, snap):
     return qty
 
 
+class MMState:
+    """Per-heat market-making book: our quotes, inventory and P&L."""
+
+    def __init__(self):
+        self.resting = Resting()
+        self.cancelled = set()    # cancel sent; next reconcile settles the final fill
+        self.inv = 0.0            # RITC units
+        self.cash_cad = 0.0       # every USD flow converted when it happens
+        self.fills = 0
+        self.volume = 0.0
+        self.passive_volume = 0.0
+        self.flatten_volume = 0.0
+        self.rebate_cad = 0.0
+        self.disabled = False
+
+    def pnl(self, mid_usd, usd):
+        """Mark-to-market in CAD, rebates included."""
+        return self.cash_cad + self.inv * mid_usd * usd + self.rebate_cad
+
+
+def _mm_book(mm, logs, heat, tick, snap, action, qty, px, usd, style, limit_px, oid):
+    signed = qty if action == "BUY" else -qty
+    mm.inv += signed
+    mm.cash_cad -= signed * px * usd
+    mm.fills += 1
+    mm.volume += qty
+    if style == "passive":
+        mm.passive_volume += qty
+        mm.rebate_cad += qty * REBATE_LMT * usd
+    else:
+        mm.flatten_volume += qty
+        mm.cash_cad -= qty * FEE_MKT * usd
+    row = {
+        "run_id": RUN_ID, "risk_model": RISK_MODEL, "heat": heat, "tick": tick,
+        "ts": now_iso(), "direction": "mm", "edge_at_decision": "", "leg": 0,
+        "ticker": RITC, "action": action, "qty": qty, "ok": True,
+        "order_id": oid, "quantity_filled": qty, "vwap": px,
+        "order_status": "TRANSACTED", "exec_style": style, "limit_price": limit_px,
+    }
+    row.update(snap)
+    logs.trades.write(row)
+
+
+def _mm_cancel(session, mm, oids):
+    live = [o for o in oids if o not in mm.cancelled]
+    if live:
+        cancel_orders(session, live)
+        mm.cancelled.update(live)
+
+
+def market_make(session, book, snap, logs, heat, tick, mm, tenders_live, fair_usd,
+                tender_blocked=False):
+    """One market-making cycle. See MM_ENABLED for the design and limits."""
+    usd = (snap["usd_bid"] + snap["usd_ask"]) / 2
+    bid, ask = top_of_book(book)
+    if not (0 < bid < ask < 1e6):
+        return
+    mid = (bid + ask) / 2
+
+    # Book fills from our resting quotes first, so every decision below sees
+    # the true inventory. Cancelled orders are settled here, never dropped.
+    if mm.resting.orders:
+        for order, qty, vwap in mm.resting.reconcile(session):
+            _mm_book(mm, logs, heat, tick, snap, order["action"], qty,
+                     float(vwap), usd, "passive", order["price"], order["order_id"])
+            print(f"  MM fill {order['action']} {qty:,.0f} @ {vwap} "
+                  f"(inv {mm.inv:+,.0f}, pnl {mm.pnl(mid, usd):+,.0f})")
+        mm.cancelled &= set(mm.resting.orders)
+
+    if not mm.disabled and mm.pnl(mid, usd) < -MM_MAX_LOSS:
+        mm.disabled = True
+        print(f"  MM off for this heat: loss {mm.pnl(mid, usd):+,.0f} past {MM_MAX_LOSS:,}")
+
+    active = (MM_ENABLED and not mm.disabled
+              and MM_START_TICK <= tick < MM_STOP_TICK
+              and abs(tender_position) <= UNWIND_THRESHOLD and not tenders_live)
+    if not active:
+        _mm_cancel(session, mm, list(mm.resting.orders))
+        # Inventory goes only when it is actually in the way. Flattening every
+        # time a tender merely appears would pay the dump ~6-8 times a heat for
+        # nothing. It must go once tender inventory is held: the tracker would
+        # otherwise net it against the tender position, and the end-of-heat
+        # flatten would then leave a stray position behind.
+        must_flatten = (abs(tender_position) > UNWIND_THRESHOLD or tender_blocked
+                        or tick >= MM_STOP_TICK or mm.disabled)
+        if mm.inv and must_flatten:
+            action = "SELL" if mm.inv > 0 else "BUY"
+            try:
+                resp = place_mkt(session, RITC, action, abs(mm.inv))
+            except ApiException as e:
+                print(f"  MM flatten failed: {e}")
+                return
+            filled = float((resp or {}).get("quantity_filled") or 0)
+            if filled:
+                _mm_book(mm, logs, heat, tick, snap, action, filled,
+                         float((resp or {}).get("vwap") or mid), usd,
+                         "mm_flatten", "", (resp or {}).get("order_id"))
+                why = ("tender blocked" if tender_blocked else
+                       "tender held" if abs(tender_position) > UNWIND_THRESHOLD else "stopped")
+                print(f"  MM flattened {action} {filled:,.0f} ({why}), pnl {mm.pnl(mid, usd):+,.0f}")
+        return
+
+    # One tick inside the touch where there is room, otherwise join it.
+    step = 0.01
+    my_bid = round(bid + step, 2) if ask - bid >= 3 * step - 1e-9 else bid
+    my_ask = round(ask - step, 2) if ask - bid >= 3 * step - 1e-9 else ask
+    premium = mid - fair_usd
+    want = {
+        "BUY": (my_bid, min(MM_SIZE, MM_MAX_INV - mm.inv))
+               if mm.inv < MM_MAX_INV and premium < MM_LEAN else None,
+        "SELL": (my_ask, min(MM_SIZE, MM_MAX_INV + mm.inv))
+                if mm.inv > -MM_MAX_INV and premium > -MM_LEAN else None,
+    }
+    for action, target in want.items():
+        mine = [oid for oid, o in mm.resting.orders.items()
+                if o["action"] == action and oid not in mm.cancelled]
+        stale = [oid for oid in mine
+                 if target is None or abs(mm.resting.orders[oid]["price"] - target[0]) > 1e-9]
+        _mm_cancel(session, mm, stale)
+        if target is None or target[1] < 1_000 or len(mine) > len(stale):
+            continue
+        try:
+            resp = place_lmt(session, RITC, action, target[1], target[0])
+        except ApiException as e:
+            print(f"  MM quote failed: {e}")
+            continue
+        if resp:
+            mm.resting.add(resp, tick)
+
+
 def swap_for_tender(session, offer, edge, pos, st, logs, heat, tick, snap):
     """Dump same-direction tender inventory so `offer` fits. Returns units dumped.
 
@@ -1463,6 +1618,8 @@ def handle_tenders(session, logs, heat, tick, snap, quotes, pos, books, st=None)
     before anything can fail, and the accept is isolated so a failure costs one
     tender rather than the cycle.
     """
+    global tender_limit_blocked
+    tender_limit_blocked = False
     try:
         offers = api_request(session, 'GET', 'tenders') or []
     except ApiException as e:
@@ -1498,6 +1655,8 @@ def handle_tenders(session, logs, heat, tick, snap, quotes, pos, books, st=None)
                 safe, reason, edge = tender_safety(
                     offer, pos, book, snap["usd_bid"], snap["usd_ask"], tick)
                 reason = f"{reason} after swap dump {dumped:,}"
+        if not safe and " would hit " in reason:
+            tender_limit_blocked = True
         side = "asks" if (offer.get('action') or '').upper() == "SELL" else "bids"
         chunk_ref, _ = vwap_for_qty(book.get(side) or [], UNWIND_CHUNK)
         visible = sum(float(r.get("quantity", 0) or 0) for r in (book.get(side) or []))
@@ -1603,7 +1762,7 @@ def execute_arb(session, logs, heat, tick, direction, edge, legs, snap):
 # CORE LOGIC
 # ============================================================================
 
-def step_once(session, logs, heat, tick, bases, cycle, st):
+def step_once(session, logs, heat, tick, bases, cycle, st, mm=None):
     books = {t: fetch_book(session, t) for t in (BULL, BEAR, RITC, USD)}
     bull_bid, bull_ask = top_of_book(books[BULL])
     bear_bid, bear_ask = top_of_book(books[BEAR])
@@ -1646,6 +1805,13 @@ def step_once(session, logs, heat, tick, bases, cycle, st):
     # After the ETF leg, so the basket comes off only once the position it was
     # hedging is actually gone.
     unwind_prehedge(session, pos, logs, heat, tick, snap)
+    if mm is not None:
+        fair = ((bull_bid + bull_ask) / 2 + (bear_bid + bear_ask) / 2) / ((usd_bid + usd_ask) / 2)
+        try:
+            market_make(session, books[RITC], snap, logs, heat, tick, mm,
+                        tenders_seen > 0, fair, tender_limit_blocked)
+        except ApiException as e:
+            print(f"  MM cycle failed: {e}")
     fx_action, fx_qty = hedge_fx(session, pos)
 
     traded = False
@@ -1748,6 +1914,28 @@ def calibrate_for_heat(logs, heat, margins, prev_bases):
     return bases, margins
 
 
+def _mm_report(logs, heat, mm):
+    """One row per heat to logs/mm.csv. Inventory is flat by MM_STOP_TICK, so
+    the P&L is realised; it is marked at 0 inventory."""
+    path = LOG_DIR / "mm.csv"
+    new = not path.exists()
+    fields = ["run_id", "risk_model", "heat", "fills", "volume", "passive_volume",
+              "flatten_volume", "end_inventory", "pnl_cad", "disabled"]
+    with path.open("a", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=fields)
+        if new:
+            w.writeheader()
+        w.writerow({"run_id": RUN_ID, "risk_model": RISK_MODEL, "heat": heat,
+                    "fills": mm.fills, "volume": round(mm.volume),
+                    "passive_volume": round(mm.passive_volume),
+                    "flatten_volume": round(mm.flatten_volume),
+                    "end_inventory": round(mm.inv),
+                    "pnl_cad": round(mm.cash_cad + mm.rebate_cad, 2),
+                    "disabled": mm.disabled})
+    print(f"    MM: {mm.fills} fills, {mm.volume:,.0f} units "
+          f"({mm.passive_volume:,.0f} passive), pnl {mm.cash_cad + mm.rebate_cad:+,.0f} CAD")
+
+
 def run_heat(session, logs, heat, margins, prev_bases):
     start_ts = now_iso()
     nlv_start = get_nlv(session)
@@ -1756,6 +1944,7 @@ def run_heat(session, logs, heat, margins, prev_bases):
     cycles = arbs = tenders_seen = tenders_accepted = 0
     nlv_end = nlv_start
     st = UnwindState()
+    mm = MMState()
 
     global tender_position, prehedge_position
     tender_position = 0   # positions are closed out at heat end
@@ -1785,7 +1974,7 @@ def run_heat(session, logs, heat, margins, prev_bases):
 
         try:
             (traded, e1, e2, nlv, t_seen, t_acc,
-             req1, req2) = step_once(session, logs, heat, tick, bases, cycles, st)
+             req1, req2) = step_once(session, logs, heat, tick, bases, cycles, st, mm)
         except ApiException as e:
             print(f"API error: {e}")
             sleep(1)
@@ -1836,6 +2025,7 @@ def run_heat(session, logs, heat, margins, prev_bases):
         "passive_share": round(share, 4),
         "fee_saved": round(saved, 2),
     })
+    _mm_report(logs, heat, mm)
     print(f"=== heat {heat} done: ticks {first_tick}-{last_tick}, {cycles} cycles, "
           f"{arbs} arbs, {tenders_seen} tenders, P&L {pnl} ===")
     print(f"    unwind {unwound:,.0f} units: {share:.0%} passive, "

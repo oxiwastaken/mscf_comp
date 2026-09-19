@@ -1130,6 +1130,42 @@ sizing, the no-pay case, direction, the arb legs, and partial fills.
 heats, so the typical heat matters more than the worst one; this only pays if
 the field turns out to cluster around our worst outcomes.
 
+## `v25_mmtest` - live test of passive RITC market making
+
+The one structural idea the replay could not test: whether passive quotes fill
+is unknowable offline, because the logs carry no trade prints. So this is a
+deliberately small live test that measures it.
+
+**What it does.** While the tender side is idle - no tender inventory held, no
+tender on offer, ticks 5-285 - it quotes 3,000 RITC a side one tick inside the
+touch (at the touch when the spread is one tick), earning the 0.01 rebate
+instead of paying the 0.02 fee. It leans on fair value, (BULL + BEAR) / USD:
+rich to it, only the offer shows; cheap, only the bid. Inventory is capped at
++/-9,000.
+
+**Staying out of the tenders' way**, which are worth 10-50x more:
+- quoting pauses while any tender is on offer;
+- inventory is flattened at market only when it is actually in the way - a
+  tender refused on the limits, or tender inventory being taken on. Flattening
+  on every tender sighting would pay the dump 6-8 times a heat for nothing;
+- tender inventory must never coexist with MM inventory, or the v16/v23
+  tracker would net one against the other and the end-of-heat flatten would
+  leave a stray position;
+- a loss of `MM_MAX_LOSS` (5,000 CAD) in a heat switches it off for that heat.
+
+**Measured in `logs/mm.csv`**, one row per heat: fills, volume, passive vs
+flatten volume, end inventory, P&L in CAD. Every fill is also in `trades.csv`
+with `direction = mm`.
+
+**What counts as working:** MM P&L positive per heat with real fill volume,
+and tender results unchanged - same accept counts, no rise in limit refusals.
+If fills are rare or P&L negative after a fair sample, it comes out.
+
+`test_mm.py` drives it against a fake exchange: quoting inside the touch, no
+duplicate quotes, repricing, fill booking including a fill that races a
+cancel, leaning on fair value, the inventory cap, pausing without dumping, the
+blocked-tender flatten, the tender-inventory flatten, and the kill switch.
+
 ## Known open items
 
 - ~~`basket_rich` is negative (−0.0218/unit over 8 arbs)~~ — **RETRACTED.**
