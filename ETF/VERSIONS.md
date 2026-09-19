@@ -549,12 +549,23 @@ tenders — each tender is logged once per cycle of its ~6-cycle life.
 
 ## Known open items
 
-- **`basket_rich` is negative** (−0.0218/unit over 8 arbs) while `etf_rich` runs
-  +0.0945. The calibrator fits each direction separately so it should widen that
-  bar on its own, but the sample is thin and it is slow. Arb positions also
-  consume the gross capacity tenders need, and tenders are worth roughly 6x more
-  per heat.
+- ~~`basket_rich` is negative (−0.0218/unit over 8 arbs)~~ — **RETRACTED.**
+  Rebuilt over the full history with `calibration.load_arbs`, `basket_rich` is
+  **+0.0223/unit over 159 arbs** (103 winners, t = +2.37). The −0.0218 came from
+  8 arbs, and the per-arb sd is 0.1186 — a standard error of 0.0419 on that
+  sample, so the reading was well inside noise and pointed the wrong way. Both
+  directions are profitable: `etf_rich` +0.0263 over 253. **Do not disable
+  either.** The related worry that arb positions starve tenders of capacity was
+  real but is v11's fix, not a reason to stop arbing: the arb is net-neutral
+  when its ETF hedge leg survives.
 - **Converters are unusable.** Human-only per the case rules, so a tender
-  position can only be unwound into the market.
-- **Spread arb ceiling is ~10k/heat** measured; tenders are ~57k/heat at peak
-  edge. Effort belongs on tender capture and unwind quality.
+  position can only be unwound into the market — or, since v14, held for
+  close-out, which is the cheaper of the two and needs no converter.
+- **Spread arb is ~822 CAD/heat**, not the ~10k previously recorded: 412 arbs
+  over 62 heats at +0.0248/unit net of fees. Tenders are worth 10-50x that.
+  Effort belongs on tender capture and exit choice.
+- **Nothing since v11 has run live.** v12–v15 are validated only against logged
+  data and the offline simulators. The passive fill *rate* in particular cannot
+  be measured from quote history — the logs carry no trade prints — so
+  `PASSIVE_MAX_LIVE` and `PASSIVE_CHUNK` are unsized by evidence. First live
+  heats should check `passive_share` in `heats.csv` before anyone tunes them.
