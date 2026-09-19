@@ -50,6 +50,64 @@ start the trader once and let it wait for ACTIVE, and there are ten heats back
 to back. Fixed: `reset_heat_state()` fires on a non-ACTIVE case and on the tick
 counter running backwards.
 
+### THE BIG ONE — we were hedging the wrong delta (shipped `217aff3`)
+
+The CRO computes the delta limit against the **market's** implied vol.
+`vol_engine` priced every greek at **our forecast** vol. Those differ precisely
+when we hold a position, because disagreeing with the market is the only reason
+to have one — so the book sat outside the band believing it was inside, and
+sent no hedge at all. It was not losing the race; it did not know there was one.
+
+Order-accurate over 120 recordings with the fine charged: **+$6,719 a heat
+(t 3.2)**, fine **$15,255 → $5,838**, peak |delta| **44,645 → 20,280**, 0/120
+illegal books. The paired backtest agrees at +$11,468 (t 7.6).
+
+**This is the second attempt.** The first (`29ea36c`) was reverted after a live
+heat with >$100k of fines. The diagnosis was right; the implementation priced
+each row at its **own** solved `market_iv`, which is garbage exactly where it
+matters — a low-vega wing whose 2-cent quote pins its IV no better than 30 vol
+points can solve anywhere. This uses the vega-weighted **chain average**, which
+`MAX_IV_SPREAD` already makes trustworthy and which the case guarantees is the
+right shape (one expiry, no smile, every strike the same IV — confirmed live at
+0.18% across the high-vega legs). That is the fix the revert commit itself
+prescribed.
+
+Live, first three heats — fines **$2,257 / $17,121 / $7,592, mean $8,990**
+against ~$15,000 before, with no `CANNOT HEDGE` and no rejections. Replayed
+on the same tapes, the fine falls in **every** heat:
+
+| heat | forecast IV | market IV |
+|---|---|---|
+| 031902 | $40,649 | **$14,624** |
+| 030349 | $34,050 | **$11,451** |
+| 030636 | $10,494 | **$5,790** |
+| 031521 | $3,085 | **$1,845** |
+
+Two measurement fixes made this judgeable and are worth keeping on their own:
+
+- **`server_delta`** — a chain field always priced at market vol, independent
+  of the flag, which `backtest.py` charges the fine on. Without it, flipping
+  the flag changes the measurement as well as the behaviour. It also took the
+  fine model's correlation against the recordings from **0.53 to 0.93**.
+- **`replay_trader` did not charge the fine at all** — fills and fees only. It
+  scored this policy at **−$2,699 while the policy halved the fine.** With the
+  fine charged it is +$6,719.
+
+Known and accepted: 4 heats in 120 now reach the 50,000-share limit (0 before),
+because the deltas being hedged are larger. Tightening `WING_MAX_SHARE_USAGE`
+does not help (still 4 at 0.70; 0.50 costs most of the gain), so it is the
+straddle demanding shares, not the structure. Accepted because peak delta more
+than halves and the worst heat IMPROVES, −$53,300 → −$46,724: the book is
+pinned while hedging **more**, not while losing control. **`CANNOT HEDGE` in
+the trader log is the thing to watch.**
+
+Also measured: it starves the wing structure slightly, since holding more
+shares shrinks `hedgeable_legs` and the target can fall under the conviction
+gate. One live heat showed wings on 11% of ticks against 36% the heat before —
+but over 80 recordings it is 41.3% → 37.8% with mean peak gross unchanged at
+2,432 contracts. The single heat did not generalise. Relaxing
+`WING_MIN_CONVICTION` recovers +$397 (t 1.0), i.e. nothing. Left alone.
+
 ### Where the money actually goes, per heat (25 heats, measured)
 
 ```
