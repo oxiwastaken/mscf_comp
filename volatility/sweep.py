@@ -19,7 +19,9 @@ import glob
 import os
 import statistics
 import sys
+import time
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 
 import autotrader as at
 import backtest
@@ -64,10 +66,21 @@ def live_results():
     return out
 
 
-def usable_heats(min_ticks=250):
-    """Recorded heats long enough to be worth scoring."""
+def usable_heats(min_ticks=250, settling=90):
+    """
+    Recorded heats long enough to be worth scoring.
+
+    Skips any recording still being written. `record.py` appends to its file
+    for the whole of a live heat, so a sweep run while the runner is going
+    would otherwise score a half-recorded heat as though it were a whole one -
+    and, worse, race the writer. `settling` seconds since the last write is
+    ample: record.py appends every tick, i.e. every second.
+    """
+    cutoff = time.time() - settling
     paths = []
     for path in sorted(glob.glob(HEATS)):
+        if os.path.getmtime(path) > cutoff:
+            continue
         with open(path, encoding='utf-8') as handle:
             n = sum(1 for _ in handle)
         if n >= min_ticks:
@@ -115,12 +128,29 @@ def score_one(args):
     return tag_of(path), book.cash, book.fees + book.spread, book.penalty
 
 
+# Leave the machine room to trade. A sweep is offline work and can wait; the
+# live trader cannot - it has one second to read the book, decide and hedge,
+# and the delta penalty is charged per second. Saturating every core with
+# backtest workers while a heat is running is how an analysis job starts
+# costing money. A third of the cores is plenty: a full 200-heat score takes
+# about ten seconds.
+DEFAULT_WORKERS = max(2, (os.cpu_count() or 4) // 3)
+
+
 def score(paths, settings=None, policy='news', workers=None):
     """Mean P&L across `paths` under `settings`. Returns (stats, per-heat)."""
     settings = settings or {}
     jobs = [(p, settings, policy) for p in paths]
-    with ProcessPoolExecutor(max_workers=workers) as pool:
-        rows = list(pool.map(score_one, jobs, chunksize=4))
+    try:
+        with ProcessPoolExecutor(
+                max_workers=workers or DEFAULT_WORKERS) as pool:
+            rows = list(pool.map(score_one, jobs, chunksize=4))
+    except BrokenProcessPool:
+        # A worker died - contention with the live trader, most likely. The
+        # numbers still matter, so fall back to serial rather than losing the
+        # run. This has to not be fatal: it runs unattended overnight.
+        print('    (a worker died; falling back to serial)', flush=True)
+        rows = [score_one(job) for job in jobs]
     values = [r[1] for r in rows]
     stats = {
         'mean': statistics.mean(values),
