@@ -84,6 +84,29 @@ exhausted.**
   t 1.1, and it saturates by 0.010, meaning it almost never binds. The sign
   changes are genuine high-conviction reversals, not noise. **Reverted, not
   shipped.** Do not re-add a parameter that does nothing.
+- **A DOLLAR gate on strike switching**, by direct analogy with the wings,
+  where gating on dollars rather than a vega ratio took t from 3.0 to 4.8.
+  Built, shared between trader and backtest through one function, and it
+  works mechanically — friction $47,540 → $41,993, contracts 18,335 → 16,664.
+  Unbounded it scores +$2,493 (t 2.1) and +$2,705 (t 1.7) order-accurate.
+
+  **It also lets the working strike drift 3.59 from spot while holding a
+  position, against 1.84 for the distance rule alone.** That is spot at 51.6
+  against a K48 straddle — deep-ITM legs, delta near ±1, almost no vega, and a
+  hedge that may not fit inside the share limit. It is the RTM52P
+  configuration, which cost $2,002 a second the one time it happened, and no
+  backtest can price it because the library may not contain the heat that
+  punishes it.
+
+  Bounding the drift to one extra strike caps it at 2.51 and keeps the
+  friction saving — but the gain falls to +$2,093 at **t 1.2**, below the bar.
+  Which is the same answer the `STRIKE_SWITCH_DISTANCE` sweep gives by a
+  cruder route: **switching trades fees for vega at roughly par.** Reverted.
+
+  Worth knowing it is close, though: the worst heat improves from −$21,242 to
+  −$9,667 and p05 of the ten-heat average from $113,207 to $117,322 across the
+  whole 600–1,400 range. If the tail ever matters more than the mean, this is
+  where to look first — with the drift bound kept.
 
 ### Standing
 
