@@ -23,3 +23,4 @@ run_id,ts,risk_model,risk_model_desc,arb_threshold_cad,order_qty,max_long_net,ma
 20260919-000354,2026-09-19T00:03:54.469,v21_grossreserve,"v20 plus: 200,000 of gross reserved for tenders, arb capped at 97,000",0.07,5000,25000,-25000,97000,0.5
 20260919-012239,2026-09-19T01:22:39.848,v22_settlelag,"v21 plus: tracker clamp confirmed over two reads, so settlement lag cannot strand a tender",0.07,5000,25000,-25000,97000,0.5
 20260919-013822,2026-09-19T01:38:22.105,v23_agreedclamp,v22 plus: a confirmed clamp writes back only the shrink both reads agree on,0.07,5000,25000,-25000,97000,0.5
+20260919-022825,2026-09-19T02:28:25.441,v24_swap,v23 plus: dump inventory to take a blocked tender when its edge pays for it,0.07,5000,25000,-25000,97000,0.5
