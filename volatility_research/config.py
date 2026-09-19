@@ -143,6 +143,11 @@ HEDGE_TARGET_DELTA = 2_000      # hedge back to roughly this magnitude
 # is $0.10 per delta per second against $0.02 a share to clear it, so the
 # buffer that protects against churn in normal conditions is a liability here.
 HEDGE_URGENT_TARGET = None
+# Price the greeks used for HEDGING at the market's implied vol rather than our
+# forecast. The server's delta limit is computed that way - verified to within
+# 5 delta against the fines it charged - but the first live attempt went badly,
+# so this stays a measured switch rather than an assumption.
+HEDGE_AT_MARKET_IV = False
 
 # --------------------------------------------------------------- dashboard
 REFRESH_SECONDS = 0.35

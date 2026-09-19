@@ -284,16 +284,22 @@ def build_chain(securities, tick, ticks_total, week_vols, mode=None):
         if not forecast or t_years <= 0:
             continue
 
+        # VALUE is judged at our forecast; RISK can optionally be measured at
+        # the market's implied vol, which is what the server's delta limit is
+        # computed against. See config.HEDGE_AT_MARKET_IV.
+        greek_vol = forecast
+        if config.HEDGE_AT_MARKET_IV:
+            greek_vol = row['market_iv'] or market_avg_iv or forecast
         try:
             fair = black_scholes(row['flag'], spot, row['strike'], t_years,
                                  config.RISK_FREE_RATE, forecast)
             row['fair'] = fair
             row['delta'] = analytical.delta(row['flag'], spot, row['strike'],
-                                            t_years, config.RISK_FREE_RATE, forecast)
+                                            t_years, config.RISK_FREE_RATE, greek_vol)
             row['gamma'] = analytical.gamma(row['flag'], spot, row['strike'],
-                                            t_years, config.RISK_FREE_RATE, forecast)
+                                            t_years, config.RISK_FREE_RATE, greek_vol)
             row['vega'] = analytical.vega(row['flag'], spot, row['strike'],
-                                          t_years, config.RISK_FREE_RATE, forecast)
+                                          t_years, config.RISK_FREE_RATE, greek_vol)
         except Exception:
             continue
 

@@ -1,0 +1,7 @@
+
+  172 recordings, policy ratchet+news
+
+  greeks priced at                 mean     vs ref      t    penalty   friction       worst
+  our forecast (shipped)   $    137,963         +0    0.0 $   13,347 $   45,640 $   -43,943
+  market implied vol       $    135,521     -2,442   -1.4 $   15,127 $   46,907 $   -34,995
+
