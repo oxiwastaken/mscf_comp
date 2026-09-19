@@ -143,6 +143,32 @@ REBALANCE_FRACTION = 0.25
 # filter reaches ~80% of a step in about ten ticks - far quicker than the maker
 # converges, so no edge is given up.
 GAP_SMOOTHING = 0.15
+# Ticks over which conviction decays after a news release. 0 disables it.
+#
+# Our edge is the market maker being slow to learn after a shock, and the case
+# says so explicitly: "as time goes on, the market maker learns about the
+# underlying volatility - at least until a new shock occurs". So the edge is
+# not a property of the gap, it is a property of the gap's AGE, and a gap that
+# has been sitting there for sixty ticks is not the same trade as one that
+# landed on the last tick.
+#
+# Measured, that is exactly what the sign accuracy does (opening_study.py):
+#
+#     ticks 0-10    94.1% right     ticks 40-55   84.8%
+#     ticks 10-25   91.3%           ticks 55-75   63.8%   <- the vacuum
+#     ticks 25-40   97.6%           ticks 75-100  91.2%   <- week 2 lands
+#
+# Ticks 55-75 are the end of week one: the maker has had fifty ticks to
+# converge, week one's remaining variance is nearly zero, and week two is not
+# announced until tick 75. There is nothing to trade and phases.py agrees -
+# that window offers -$679 of available P&L - yet the model is in a position
+# for 68% of it at 310 contracts a leg, at barely better than a coin flip.
+#
+# Keying off the ANNOUNCEMENT rather than the tick number is deliberate. The
+# tick numbers that look best in these recordings are the week boundaries, and
+# fitting to those is fitting to a calendar; decaying from the last release is
+# the actual economics and survives a schedule that moves.
+SIGNAL_HALFLIFE_TICKS = 0
 # How much of the maker's own recent drift to add to the signal.
 #
 # Measured over 30,932 tick observations from 108 recorded heats

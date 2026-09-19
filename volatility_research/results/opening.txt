@@ -1,0 +1,17 @@
+
+  160 recordings, policy ratchet+news
+
+       ticks  in a position   mean size   sign right
+     0-10             100%         487       94.1%
+    10-25             100%         482       91.3%
+    25-40              94%         446       97.6%
+    40-55              67%         311       84.8%
+    55-75              68%         310       63.8%
+    75-100             73%         340       91.2%
+   100-150             62%         279       81.1%
+   150-225             69%         310       84.1%
+   225-300             58%         256       88.1%
+
+  "in a position" is the fraction of ticks holding anything at all;
+  "mean size" is contracts per straddle leg, cap 500.
+
